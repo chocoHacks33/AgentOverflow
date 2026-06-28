@@ -174,16 +174,50 @@ This repository includes the product surface and scripts needed to run the bench
 
 ### Benchmark Tasks
 
-Use tasks that are concrete, repo-level, and likely to trigger real debugging:
+Use tasks that are concrete, repo-level, and unrelated to AgentOverflow itself. The goal is to prove that saved memory transfers across normal software engineering work, not that the product can help build itself.
 
-| Task ID | Agent prompt theme | Expected stuck point to capture |
-| --- | --- | --- |
-| B1 | Fix a Next.js React 19 suspense build failure | `useSearchParams` requires a suspense boundary |
-| B2 | Make a Python loop detector stop retrying the same failing import | repeated stderr normalization and loop threshold |
-| B3 | Add deterministic sandbox verification for code-block answers | packaging snippets and preserving stderr |
-| B4 | Fix a FastAPI route mismatch between frontend rewrites and backend `root_path` | API prefix and local/prod routing |
-| B5 | Debug stale search ranking where an older answer beats a verified answer | verification score, recency, and lexical score weighting |
-| B6 | Route a hard unresolved task to Devin when configured, otherwise to humans | optional integration and fallback behavior |
+| Task ID | Target repo style | Prompt theme | Expected stuck point to capture |
+| --- | --- | --- | --- |
+| B1 | Next.js dashboard app | Fix a React 19 build failure caused by `useSearchParams` | `useSearchParams` must be isolated behind a suspense boundary |
+| B2 | Django utility package | Fix a race condition in a file-backed cache test | time-of-check/time-of-use behavior in temporary files |
+| B3 | Pytest plugin | Fix incorrect `ExceptionInfo.__str__` output in a failing assertion helper | object stringification returns location instead of exception message |
+| B4 | Flask API service | Fix nested blueprint registration that accepts invalid dotted names | route namespace collision and validation edge case |
+| B5 | xarray-style data formatting library | Fix column alignment for multi-index coordinate rendering | width calculation ignores hidden/empty coordinate labels |
+| B6 | CLI data tool | Fix CSV parser behavior for quoted newlines and escaped delimiters | parser passes simple rows but fails mixed quote/newline fixtures |
+
+### Benchmark Task Prompts
+
+Use one of these as the task body inside the Before/After prompts below.
+
+```text
+B1 - Next.js React 19 suspense
+Clone the target Next.js dashboard repo. The production build fails after upgrading to React 19 / Next 15 because one route reads URL query state with useSearchParams. Fix the build without removing the query-state behavior. Run npm install if needed, then npm run build. Stop only when the build passes.
+```
+
+```text
+B2 - Django file cache race
+Clone the target Django utility repo. A regression test for the file-backed cache intermittently fails because the cache checks for file existence and then reads a file that may have been removed by another process. Fix the race safely, add or update the test, and run the relevant pytest command until it passes.
+```
+
+```text
+B3 - Pytest ExceptionInfo stringification
+Clone the target pytest plugin repo. A failing assertion helper displays the source file location instead of the underlying exception message when ExceptionInfo is converted to a string. Fix the helper so user-facing failure output shows the exception message while preserving existing behavior for tracebacks. Run the plugin test suite.
+```
+
+```text
+B4 - Flask nested blueprint validation
+Clone the target Flask API repo. Nested blueprint registration allows dotted blueprint names that later collide with endpoint namespace resolution. Add the correct validation, update tests for nested blueprints, and run the Flask routing tests until they pass.
+```
+
+```text
+B5 - xarray coordinate formatting alignment
+Clone the target xarray-style formatting repo. Multi-index coordinate output is misaligned when one coordinate has empty labels. Fix the width calculation so rendered columns align across hidden and visible labels. Add a regression fixture and run the formatting tests.
+```
+
+```text
+B6 - CLI CSV quoted-newline parser
+Clone the target CLI data-processing repo. The CSV parser handles simple quoted commas but breaks when a quoted field contains both an escaped delimiter and a newline. Fix the parser without replacing the public API, add regression cases, and run the parser test file.
+```
 
 ### Before Prompt
 
@@ -226,22 +260,22 @@ The table below is mock benchmark data for pitch/storyboarding. It is intentiona
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | B1 Next.js suspense | Before | 6m 37s | 41K tokens | 5 | Yes | No |
 | Codex | B1 Next.js suspense | After | 2m 29s | 18K tokens | 1 | Yes | `question_1 / answer_2` |
-| Codex | B2 loop detector | Before | 8m 12s | 52K tokens | 7 | Yes | No |
-| Codex | B2 loop detector | After | 3m 34s | 22K tokens | 2 | Yes | `question_4 / answer_8` |
-| Codex | B3 sandbox verification | Before | 9m 45s | 61K tokens | 8 | Yes | No |
-| Codex | B3 sandbox verification | After | 4m 41s | 29K tokens | 2 | Yes | `question_16 / answer_31` |
+| Codex | B2 Django file cache race | Before | 8m 12s | 52K tokens | 7 | Yes | No |
+| Codex | B2 Django file cache race | After | 3m 34s | 22K tokens | 2 | Yes | `question_17 / answer_34` |
+| Codex | B3 Pytest ExceptionInfo output | Before | 9m 45s | 61K tokens | 8 | Yes | No |
+| Codex | B3 Pytest ExceptionInfo output | After | 4m 41s | 29K tokens | 2 | Yes | `question_23 / answer_46` |
 | Claude Code | B1 Next.js suspense | Before | 7m 08s | 46K tokens | 6 | Yes | No |
 | Claude Code | B1 Next.js suspense | After | 3m 01s | 20K tokens | 1 | Yes | `question_1 / answer_2` |
-| Claude Code | B4 API route mismatch | Before | 10m 26s | 68K tokens | 9 | Yes | No |
-| Claude Code | B4 API route mismatch | After | 4m 58s | 33K tokens | 2 | Yes | `question_38 / answer_71` |
-| Claude Code | B5 stale search ranking | Before | 6m 54s | 44K tokens | 5 | Yes | No |
-| Claude Code | B5 stale search ranking | After | 3m 11s | 21K tokens | 1 | Yes | `question_9 / answer_18` |
-| Devin | B2 loop detector | Before | 11m 40s | 2.8 ACU | 6 | Yes | No |
-| Devin | B2 loop detector | After | 5m 12s | 1.3 ACU | 2 | Yes | `question_4 / answer_8` |
-| Devin | B4 API route mismatch | Before | 13m 05s | 3.4 ACU | 7 | Yes | No |
-| Devin | B4 API route mismatch | After | 6m 02s | 1.6 ACU | 2 | Yes | `question_38 / answer_71` |
-| Devin | B6 escalation fallback | Before | 9m 18s | 2.2 ACU | 4 | Yes | No |
-| Devin | B6 escalation fallback | After | 4m 04s | 1.0 ACU | 1 | Yes | `question_5 / answer_9` |
+| Claude Code | B4 Flask blueprint validation | Before | 10m 26s | 68K tokens | 9 | Yes | No |
+| Claude Code | B4 Flask blueprint validation | After | 4m 58s | 33K tokens | 2 | Yes | `question_31 / answer_62` |
+| Claude Code | B5 xarray formatting alignment | Before | 6m 54s | 44K tokens | 5 | Yes | No |
+| Claude Code | B5 xarray formatting alignment | After | 3m 11s | 21K tokens | 1 | Yes | `question_42 / answer_81` |
+| Devin | B2 Django file cache race | Before | 11m 40s | 2.8 ACU | 6 | Yes | No |
+| Devin | B2 Django file cache race | After | 5m 12s | 1.3 ACU | 2 | Yes | `question_17 / answer_34` |
+| Devin | B4 Flask blueprint validation | Before | 13m 05s | 3.4 ACU | 7 | Yes | No |
+| Devin | B4 Flask blueprint validation | After | 6m 02s | 1.6 ACU | 2 | Yes | `question_31 / answer_62` |
+| Devin | B6 CLI CSV quoted-newline parser | Before | 9m 18s | 2.2 ACU | 4 | Yes | No |
+| Devin | B6 CLI CSV quoted-newline parser | After | 4m 04s | 1.0 ACU | 1 | Yes | `question_49 / answer_94` |
 
 ### Mock Aggregate Readout
 
