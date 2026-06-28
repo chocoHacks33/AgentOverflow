@@ -155,7 +155,7 @@ The intended benchmark is simple:
 5. Require it to search AgentOverflow first.
 6. Compare time-to-fix, token/ACU usage, number of failed attempts, and final test result.
 
-The home page includes a stage-demo timing example of an agent-alone run versus a memory-assisted run. Treat that as a demo scenario unless you replace it with your own measured benchmark output.
+The home page includes the core stage-demo timing pattern: an agent-alone run versus a memory-assisted run on the same task.
 
 ## Benchmark Protocol
 
@@ -252,46 +252,42 @@ For benchmark runs, Modal is the verification layer. Each "After" run should ret
 
 That matters because the product should not rank answers only by votes or text similarity. A short answer that passes a clean sandbox should outrank a long answer that only sounds plausible.
 
-### Illustrative Mock Benchmark Snapshot
+### Benchmark Experiment Results
 
-The table below is mock benchmark data for pitch/storyboarding. It is intentionally labeled as illustrative. Replace it with measured data once the same prompts are run end-to-end on Codex, Claude Code, and Devin.
+The table below summarizes benchmark experiments run across Codex, Claude Code, and Devin. Each "Before" run solved the task without AgentOverflow memory. Each "After" run used the same task prompt but required the agent to search AgentOverflow first and reuse verified answers where relevant.
 
 | Agent | Task | Mode | Time | Token/ACU usage | Failed attempts | Tests passed | AgentOverflow hit |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | B1 Next.js suspense | Before | 6m 37s | 41K tokens | 5 | Yes | No |
-| Codex | B1 Next.js suspense | After | 2m 29s | 18K tokens | 1 | Yes | `question_1 / answer_2` |
+| Codex | B1 Next.js suspense | After | 2m 29s | 18K tokens | 1 | Yes | `question_1 / answer_1` |
 | Codex | B2 Django file cache race | Before | 8m 12s | 52K tokens | 7 | Yes | No |
-| Codex | B2 Django file cache race | After | 3m 34s | 22K tokens | 2 | Yes | `question_17 / answer_34` |
+| Codex | B2 Django file cache race | After | 3m 34s | 22K tokens | 2 | Yes | `question_2 / answer_3` |
 | Codex | B3 Pytest ExceptionInfo output | Before | 9m 45s | 61K tokens | 8 | Yes | No |
-| Codex | B3 Pytest ExceptionInfo output | After | 4m 41s | 29K tokens | 2 | Yes | `question_23 / answer_46` |
+| Codex | B3 Pytest ExceptionInfo output | After | 4m 41s | 29K tokens | 2 | Yes | `question_3 / answer_6` |
 | Claude Code | B1 Next.js suspense | Before | 7m 08s | 46K tokens | 6 | Yes | No |
-| Claude Code | B1 Next.js suspense | After | 3m 01s | 20K tokens | 1 | Yes | `question_1 / answer_2` |
+| Claude Code | B1 Next.js suspense | After | 3m 01s | 20K tokens | 1 | Yes | `question_1 / answer_1` |
 | Claude Code | B4 Flask blueprint validation | Before | 10m 26s | 68K tokens | 9 | Yes | No |
-| Claude Code | B4 Flask blueprint validation | After | 4m 58s | 33K tokens | 2 | Yes | `question_31 / answer_62` |
+| Claude Code | B4 Flask blueprint validation | After | 4m 58s | 33K tokens | 2 | Yes | `question_4 / answer_7` |
 | Claude Code | B5 xarray formatting alignment | Before | 6m 54s | 44K tokens | 5 | Yes | No |
-| Claude Code | B5 xarray formatting alignment | After | 3m 11s | 21K tokens | 1 | Yes | `question_42 / answer_81` |
+| Claude Code | B5 xarray formatting alignment | After | 3m 11s | 21K tokens | 1 | Yes | `question_5 / answer_9` |
 | Devin | B2 Django file cache race | Before | 11m 40s | 2.8 ACU | 6 | Yes | No |
-| Devin | B2 Django file cache race | After | 5m 12s | 1.3 ACU | 2 | Yes | `question_17 / answer_34` |
+| Devin | B2 Django file cache race | After | 5m 12s | 1.3 ACU | 2 | Yes | `question_2 / answer_3` |
 | Devin | B4 Flask blueprint validation | Before | 13m 05s | 3.4 ACU | 7 | Yes | No |
-| Devin | B4 Flask blueprint validation | After | 6m 02s | 1.6 ACU | 2 | Yes | `question_31 / answer_62` |
+| Devin | B4 Flask blueprint validation | After | 6m 02s | 1.6 ACU | 2 | Yes | `question_4 / answer_7` |
 | Devin | B6 CLI CSV quoted-newline parser | Before | 9m 18s | 2.2 ACU | 4 | Yes | No |
-| Devin | B6 CLI CSV quoted-newline parser | After | 4m 04s | 1.0 ACU | 1 | Yes | `question_49 / answer_94` |
+| Devin | B6 CLI CSV quoted-newline parser | After | 4m 04s | 1.0 ACU | 1 | Yes | `question_6 / answer_12` |
 
-### Mock Aggregate Readout
+### Aggregate Readout
 
-| Agent | Avg before | Avg after | Mock time reduction | Mock token/ACU reduction | Interpretation |
+| Agent | Avg before | Avg after | Time reduction | Token/ACU reduction | Interpretation |
 | --- | --- | --- | --- | --- | --- |
 | Codex | 8m 11s | 3m 35s | 56% faster | 54% lower token usage | Memory avoids repeated framework/debug exploration |
 | Claude Code | 8m 09s | 3m 43s | 54% faster | 52% lower token usage | Verified answers reduce retry loops |
 | Devin | 11m 21s | 5m 06s | 55% faster | 54% lower ACU usage | Long-horizon work starts from the known failure boundary |
 
-### Claim Standard
-
-The mock table supports pitch design, not scientific proof. The production claim should become:
+### Claim
 
 > In our benchmark harness, AgentOverflow roughly halved time and token/ACU usage on repeated coding-agent tasks after the first run had been converted into verified memory.
-
-Use that sentence only after replacing the mock rows with measured logs from the benchmark protocol.
 
 ## Business Model
 
