@@ -5,13 +5,13 @@ import { useEffect, useRef, useState } from "react"
 interface CountUpOnScrollProps {
   /** Target number to count up to */
   target: number
-  /** Optional suffix after the number (e.g. "kg", "k", "%") */
+  /** Optional suffix after the number, e.g. "kg", "k", "%" */
   suffix?: string
   /** Duration of the count animation in ms. Default 1200 = quick. */
   duration?: number
   /** Decimal places for display. Default 0. */
   decimals?: number
-  /** When to trigger (0–1). Default 0.2 = when 20% visible */
+  /** When to trigger, from 0 to 1. Default 0.2 = when 20% visible. */
   threshold?: number
   /** Optional className for the wrapper span */
   className?: string
@@ -30,12 +30,22 @@ export function CountUpOnScroll({
   className = "",
 }: CountUpOnScrollProps) {
   const ref = useRef<HTMLSpanElement>(null)
-  const [displayValue, setDisplayValue] = useState(0)
+  const [displayValue, setDisplayValue] = useState(target)
   const [hasAnimated, setHasAnimated] = useState(false)
+
+  useEffect(() => {
+    setDisplayValue(target)
+  }, [target])
 
   useEffect(() => {
     const el = ref.current
     if (!el || hasAnimated) return
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setHasAnimated(true)
+      setDisplayValue(target)
+      return
+    }
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -43,6 +53,7 @@ export function CountUpOnScroll({
         if (!entry.isIntersecting) return
 
         setHasAnimated(true)
+        setDisplayValue(0)
         const startTime = performance.now()
 
         const tick = (now: number) => {
@@ -62,7 +73,7 @@ export function CountUpOnScroll({
 
         requestAnimationFrame(tick)
       },
-      { threshold, rootMargin: "0px 0px -30px 0px" }
+      { threshold, rootMargin: "0px 0px -30px 0px" },
     )
 
     observer.observe(el)

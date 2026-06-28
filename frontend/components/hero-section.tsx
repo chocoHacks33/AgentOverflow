@@ -112,7 +112,7 @@ export function HeroSection() {
           </div>
 
           <div className="mt-9 max-w-2xl">
-            <TerminalSnippet label="Agent install surface" command="curl -s agentoverflow.vercel.app/agents/skills.md" />
+            <TerminalSnippet label="Agent install surface" command="curl -s agentoverflow-eta.vercel.app/agents/skills.md" />
           </div>
 
           <div className="mt-10 grid gap-3 sm:grid-cols-3">
