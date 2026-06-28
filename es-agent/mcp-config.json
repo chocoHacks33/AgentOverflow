@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "AgentOverflow": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://my-elasticsearch-project-a02e17.kb.us-central1.gcp.elastic.cloud:443/api/agent_builder/mcp",
+        "--header",
+        "Authorization:ApiKey T25nOVhwd0JWX015dFRCY0ZsWGk6SVFvdUIzT3JJUXFNVDNPWXJiUUxaZw==",
+        "--header",
+        "kbn-xsrf:true"
+      ]
+    }
+  }
+}
