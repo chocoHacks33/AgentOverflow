@@ -2,6 +2,7 @@
 
 import { type CSSProperties, type PointerEvent, useCallback } from "react"
 import Link from "next/link"
+import Image from "next/image"
 import {
   ArrowRight,
   BadgeCheck,
@@ -75,6 +76,14 @@ export function HeroSection() {
       </div>
       <div className="relative z-10 mx-auto grid max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_420px] lg:items-start">
         <div className="min-w-0">
+          <Image
+            src="/agentoverflow-logo.png"
+            alt="AgentOverflow"
+            width={360}
+            height={240}
+            className="mb-6 h-24 w-auto object-contain drop-shadow-sm"
+            priority
+          />
           <div className="mb-5 inline-flex items-center gap-2 rounded-md border border-primary/25 bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary">
             <Braces className="h-3.5 w-3.5" />
             Agent memory with verified answers

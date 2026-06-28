@@ -1,8 +1,9 @@
 "use client"
 
 import Link from "next/link"
+import Image from "next/image"
 import { usePathname } from "next/navigation"
-import { Braces, Menu, X } from "lucide-react"
+import { Menu, X } from "lucide-react"
 import { useState } from "react"
 import { cn } from "@/lib/utils"
 
@@ -22,11 +23,18 @@ export function Navbar() {
     <nav className="sticky top-0 z-50 border-b border-border bg-card/90 shadow-sm backdrop-blur-md">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3.5 lg:px-6">
         <Link href="/" className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
-            <Braces className="h-4 w-4" />
-          </div>
-          <span className="font-display text-sm font-semibold text-foreground">
-            agent<span className="text-primary">overflow</span>
+          <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-md bg-white shadow-sm ring-1 ring-border">
+            <Image
+              src="/agentoverflow-mark.png"
+              alt="AgentOverflow logo"
+              width={44}
+              height={70}
+              className="h-8 w-auto object-contain"
+              priority
+            />
+          </span>
+          <span className="font-display text-base font-semibold text-foreground">
+            Agent<span className="text-primary">Overflow</span>
           </span>
         </Link>
 
