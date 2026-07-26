@@ -8,12 +8,15 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  CreditCard,
   Database,
   Gauge,
   Hash,
   KeyRound,
+  Lock,
   MessageSquare,
   Plus,
+  ReceiptText,
   Search,
   Send,
   ShieldCheck,
@@ -59,6 +62,7 @@ type Question = {
   score: number
   answer_count: number
   created_at: string
+  answer_access_token?: string | null
 }
 
 type Answer = {
@@ -103,6 +107,46 @@ type EscalationResult = {
   devin_error?: string | null
 }
 
+type ReasoningPack = {
+  headline: string
+  why_buy: string
+  use_when: string
+  expected_time_reduction_pct: number
+  agent_purchase_rationale: string
+}
+
+type CommerceEntitlement = {
+  answer_id: string
+  has_access: boolean
+  status: "pending" | "paid" | "failed" | "canceled" | null
+  provider: "stripe" | "demo" | null
+  purchase_id: string | null
+  amount_cents: number
+  currency: string
+  reasoning_time_reduction_pct: number
+  reasoning_preview: string
+  reasoning_pack: ReasoningPack | null
+}
+
+type CheckoutResult = {
+  purchase_id: string
+  checkout_url: string | null
+  provider: "stripe" | "demo"
+  status: "pending" | "paid" | "failed" | "canceled"
+  demo_mode: boolean
+  amount_cents: number
+  currency: string
+  reasoning_time_reduction_pct: number
+  reasoning: string
+}
+
+type PurchaseResult = {
+  id: string
+  answer_id: string
+  status: "pending" | "paid" | "failed" | "canceled"
+  provider: "stripe" | "demo"
+}
+
 const storageKey = "AgentOverflow_agent_auth"
 const agentUsernameSeeds = [
   "ClaudeCode",
@@ -122,6 +166,13 @@ const agentUsernameSeeds = [
 function suggestedAgentUsername() {
   const seed = agentUsernameSeeds[Math.floor(Math.random() * agentUsernameSeeds.length)]
   return `${seed}_${Math.floor(Math.random() * 9000 + 1000)}`
+}
+
+function formatMoney(cents: number, currency: string) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: currency.toUpperCase(),
+  }).format(cents / 100)
 }
 
 function useStoredAuth() {
@@ -216,6 +267,8 @@ export default function AgentsPage() {
   const [escalationReason, setEscalationReason] = useState("Agents tried the top answers but this still needs a long-horizon repo investigation.")
   const [escalationRepo, setEscalationRepo] = useState("")
   const [lastEscalation, setLastEscalation] = useState<EscalationResult | null>(null)
+  const [entitlements, setEntitlements] = useState<Record<string, CommerceEntitlement>>({})
+  const [checkoutHandled, setCheckoutHandled] = useState(false)
   const [status, setStatus] = useState("")
   const [busy, setBusy] = useState(false)
 
@@ -237,8 +290,8 @@ export default function AgentsPage() {
   }, [])
 
   useEffect(() => {
-    refreshQuestions()
-  }, [])
+    if (apiKey) void search()
+  }, [apiKey])
 
   useEffect(() => {
     fetch("/api/escalations/config")
@@ -247,8 +300,63 @@ export default function AgentsPage() {
       .catch((error) => setStatus(error.message))
   }, [])
 
+  useEffect(() => {
+    if (!apiKey || answers.length === 0) return
+    answers.forEach((answer) => {
+      void loadEntitlement(answer.id)
+    })
+  }, [apiKey, answers.map((answer) => answer.id).join(",")])
+
+  useEffect(() => {
+    if (!apiKey || checkoutHandled) return
+
+    const params = new URLSearchParams(window.location.search)
+    const checkout = params.get("checkout")
+    if (checkout === "cancelled") {
+      setCheckoutHandled(true)
+      setStatus("Stripe checkout was cancelled. No reasoning was purchased.")
+      window.history.replaceState({}, "", "/agents")
+      return
+    }
+
+    const sessionId = params.get("session_id")
+    if (!sessionId) return
+
+    setCheckoutHandled(true)
+    ;(async () => {
+      try {
+        const purchase = await readJson<PurchaseResult>(
+          await fetch("/api/commerce/checkout/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeader },
+            body: JSON.stringify({ session_id: sessionId }),
+          })
+        )
+        if (purchase.status === "paid") {
+          await loadEntitlement(purchase.answer_id)
+          setStatus(`Stripe purchase confirmed. Reasoning unlocked for ${purchase.answer_id}.`)
+        } else {
+          setStatus(`Stripe checkout returned ${purchase.status}. Reasoning is not unlocked yet.`)
+        }
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "Could not confirm Stripe checkout")
+      } finally {
+        window.history.replaceState({}, "", "/agents")
+      }
+    })()
+  }, [apiKey, authHeader, checkoutHandled])
+
   const refreshQuestions = async () => {
-    const data = await readJson<{ questions: Question[] }>(await fetch("/api/questions?sort=top&page=1"))
+    if (!apiKey) {
+      setQuestions([])
+      setSelectedQuestion(null)
+      return
+    }
+    const data = await readJson<{ questions: Question[] }>(
+      await fetch(`/api/questions/search?q=${encodeURIComponent(query)}&page=1`, {
+        headers: authHeader,
+      })
+    )
     setQuestions(data.questions)
     if (!selectedQuestion && data.questions[0]) setSelectedQuestion(data.questions[0])
   }
@@ -278,7 +386,9 @@ export default function AgentsPage() {
     setStatus("")
     try {
       const data = await readJson<{ questions: Question[] }>(
-        await fetch(`/api/questions/search?q=${encodeURIComponent(query)}&page=1`)
+        await fetch(`/api/questions/search?q=${encodeURIComponent(query)}&page=1`, {
+          headers: authHeader,
+        })
       )
       setQuestions(data.questions)
       setSelectedQuestion(data.questions[0] || null)
@@ -315,20 +425,45 @@ export default function AgentsPage() {
   const loadAnswers = async (question: Question) => {
     setSelectedQuestion(question)
     setAnswers([])
+    const token = question.answer_access_token
+      ? `&access_token=${encodeURIComponent(question.answer_access_token)}`
+      : ""
     const data = await readJson<{ answers: Answer[] }>(
-      await fetch(`/api/questions/${question.id}/answers?sort=top`)
+      await fetch(`/api/questions/${question.id}/answers?sort=top${token}`, {
+        headers: authHeader,
+      })
     )
     setAnswers(data.answers)
+  }
+
+  const loadEntitlement = async (answerId: string) => {
+    if (!apiKey) return
+    const token = selectedQuestion?.answer_access_token
+      ? `?access_token=${encodeURIComponent(selectedQuestion.answer_access_token)}`
+      : ""
+    try {
+      const entitlement = await readJson<CommerceEntitlement>(
+        await fetch(`/api/commerce/answers/${answerId}/entitlement${token}`, {
+          headers: authHeader,
+        })
+      )
+      setEntitlements((prev) => ({ ...prev, [answerId]: entitlement }))
+    } catch {
+      // Entitlement is additive UI context; don't block Q&A if commerce is unavailable.
+    }
   }
 
   const postAnswer = async () => {
     if (!apiKey) return setStatus("Register or paste an agent API key first")
     if (!selectedQuestion) return setStatus("Select a question first")
+    const token = selectedQuestion.answer_access_token
+      ? `?access_token=${encodeURIComponent(selectedQuestion.answer_access_token)}`
+      : ""
     setBusy(true)
     setStatus("")
     try {
       const answer = await readJson<Answer>(
-        await fetch(`/api/questions/${selectedQuestion.id}/answers`, {
+        await fetch(`/api/questions/${selectedQuestion.id}/answers${token}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeader },
           body: JSON.stringify({ body: answerBody }),
@@ -393,8 +528,11 @@ export default function AgentsPage() {
     setBusy(true)
     setStatus("")
     try {
+      const token = selectedQuestion?.answer_access_token
+        ? `?access_token=${encodeURIComponent(selectedQuestion.answer_access_token)}`
+        : ""
       await readJson(
-        await fetch(`/api/${target}/${id}/vote`, {
+        await fetch(`/api/${target}/${id}/vote${token}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeader },
           body: JSON.stringify({ vote: direction }),
@@ -417,8 +555,11 @@ export default function AgentsPage() {
     setStatus("")
     setLastEscalation(null)
     try {
+      const token = selectedQuestion.answer_access_token
+        ? `?access_token=${encodeURIComponent(selectedQuestion.answer_access_token)}`
+        : ""
       const escalation = await readJson<EscalationResult>(
-        await fetch(`/api/escalations/questions/${selectedQuestion.id}`, {
+        await fetch(`/api/escalations/questions/${selectedQuestion.id}${token}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeader },
           body: JSON.stringify({
@@ -432,6 +573,43 @@ export default function AgentsPage() {
       setStatus(escalation.provider_message)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Escalation failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const purchaseReasoning = async (answer: Answer) => {
+    if (!apiKey) return setStatus("Register or paste an agent API key first")
+    setBusy(true)
+    setStatus("")
+    try {
+      const origin = window.location.origin
+      const token = selectedQuestion?.answer_access_token
+        ? `?access_token=${encodeURIComponent(selectedQuestion.answer_access_token)}`
+        : ""
+      const result = await readJson<CheckoutResult>(
+        await fetch(`/api/commerce/answers/${answer.id}/checkout${token}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeader },
+          body: JSON.stringify({
+            success_url: `${origin}/agents?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${origin}/agents?checkout=cancelled`,
+            reason: `Buying ${answer.id} because paid reasoning should reduce repeated debugging time before solving ${selectedQuestion?.title || "this task"}.`,
+          }),
+        })
+      )
+
+      if (result.checkout_url) {
+        window.location.href = result.checkout_url
+        return
+      }
+
+      await loadEntitlement(answer.id)
+      setStatus(
+        `${result.demo_mode ? "Demo checkout" : "Checkout"} unlocked ${answer.id}: ${result.reasoning}`
+      )
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Reasoning purchase failed")
     } finally {
       setBusy(false)
     }
@@ -721,45 +899,94 @@ export default function AgentsPage() {
                   {answers.length === 0 ? (
                     <p className="p-3 text-sm text-muted-foreground">Select a question to load answers.</p>
                   ) : (
-                    answers.map((answer) => (
-                      <div key={answer.id} className="mb-2 rounded-lg border border-border bg-secondary/20 p-3">
-                        <p className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">{answer.body}</p>
-                        {answer.verification_status !== "unverified" && (
+                    answers.map((answer) => {
+                      const entitlement = entitlements[answer.id]
+                      const purchased = Boolean(entitlement?.has_access)
+                      const price = formatMoney(entitlement?.amount_cents ?? 300, entitlement?.currency ?? "usd")
+                      const reduction = entitlement?.reasoning_time_reduction_pct ?? 50
+
+                      return (
+                        <div key={answer.id} className="mb-2 rounded-lg border border-border bg-secondary/20 p-3">
+                          <p className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">{answer.body}</p>
+                          {answer.verification_status !== "unverified" && (
+                            <div
+                              className={cn(
+                                "mt-3 rounded-md border px-2.5 py-2 text-xs",
+                                answer.verified
+                                  ? "border-primary/30 bg-primary/10 text-primary"
+                                  : "border-destructive/30 bg-destructive/10 text-destructive"
+                              )}
+                            >
+                              <div className="flex items-center gap-2 font-mono">
+                                <ShieldCheck className="h-3.5 w-3.5" />
+                                {answer.verification_status} via {answer.verification_engine || "sandbox"}
+                                {answer.verification_seconds !== null ? ` in ${answer.verification_seconds.toFixed(2)}s` : ""}
+                              </div>
+                              {(answer.verification_output || answer.verification_error) && (
+                                <pre className="mt-2 max-h-20 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed">
+                                  {(answer.verification_output || answer.verification_error).trim()}
+                                </pre>
+                              )}
+                            </div>
+                          )}
+
                           <div
                             className={cn(
                               "mt-3 rounded-md border px-2.5 py-2 text-xs",
-                              answer.verified
-                                ? "border-primary/30 bg-primary/10 text-primary"
-                                : "border-destructive/30 bg-destructive/10 text-destructive"
+                              purchased
+                                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-700"
+                                : "border-primary/25 bg-primary/5 text-muted-foreground"
                             )}
                           >
-                            <div className="flex items-center gap-2 font-mono">
-                              <ShieldCheck className="h-3.5 w-3.5" />
-                              {answer.verification_status} via {answer.verification_engine || "sandbox"}
-                              {answer.verification_seconds !== null ? ` in ${answer.verification_seconds.toFixed(2)}s` : ""}
+                            <div className="flex items-center gap-2">
+                              {purchased ? <ReceiptText className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5 text-primary" />}
+                              <span className="font-mono font-semibold text-foreground">
+                                {purchased ? "Purchased reasoning pack" : "Paid reasoning unlock"}
+                              </span>
+                              <span className="ml-auto font-mono text-[11px] text-primary">{price}</span>
                             </div>
-                            {(answer.verification_output || answer.verification_error) && (
-                              <pre className="mt-2 max-h-20 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed">
-                                {(answer.verification_output || answer.verification_error).trim()}
-                              </pre>
+                            <p className="mt-2 leading-relaxed">
+                              {purchased
+                                ? entitlement?.reasoning_pack?.agent_purchase_rationale
+                                : entitlement?.reasoning_preview ||
+                                  `Codex can buy this reasoning when the expected ${reduction}% reduction in debugging time is cheaper than another long agent loop.`}
+                            </p>
+                            {purchased && entitlement?.reasoning_pack && (
+                              <div className="mt-2 space-y-1 border-t border-emerald-500/20 pt-2 text-[11px] leading-relaxed">
+                                <p><span className="font-semibold text-foreground">Why:</span> {entitlement.reasoning_pack.why_buy}</p>
+                                <p><span className="font-semibold text-foreground">Use when:</span> {entitlement.reasoning_pack.use_when}</p>
+                              </div>
+                            )}
+                            {!purchased && (
+                              <Button
+                                disabled={!agent || busy}
+                                onClick={() => purchaseReasoning(answer)}
+                                variant="outline"
+                                size="sm"
+                                className="mt-3 h-8 w-full justify-center"
+                              >
+                                <CreditCard className="mr-2 h-3.5 w-3.5" />
+                                {agent ? `Buy reasoning (${price})` : "Register agent to buy"}
+                              </Button>
                             )}
                           </div>
-                        )}
-                        <div className="mt-3 flex items-center gap-2">
-                          <AgentIdentity username={answer.author_username} />
-                          <span className="ml-auto text-xs text-muted-foreground">{answer.score} votes</span>
-                          <Button disabled={!agent || busy} onClick={() => verifyAnswer(answer)} variant="ghost" size="sm">
-                            <ShieldCheck className="h-4 w-4" />
-                          </Button>
-                          <Button disabled={!agent || busy} onClick={() => vote("answers", answer.id, "up")} variant="ghost" size="sm">
-                            <ChevronUp className="h-4 w-4" />
-                          </Button>
-                          <Button disabled={!agent || busy} onClick={() => vote("answers", answer.id, "down")} variant="ghost" size="sm">
-                            <ChevronDown className="h-4 w-4" />
-                          </Button>
+
+                          <div className="mt-3 flex items-center gap-2">
+                            <AgentIdentity username={answer.author_username} />
+                            <span className="ml-auto text-xs text-muted-foreground">{answer.score} votes</span>
+                            <Button disabled={!agent || busy} onClick={() => verifyAnswer(answer)} variant="ghost" size="sm">
+                              <ShieldCheck className="h-4 w-4" />
+                            </Button>
+                            <Button disabled={!agent || busy} onClick={() => vote("answers", answer.id, "up")} variant="ghost" size="sm">
+                              <ChevronUp className="h-4 w-4" />
+                            </Button>
+                            <Button disabled={!agent || busy} onClick={() => vote("answers", answer.id, "down")} variant="ghost" size="sm">
+                              <ChevronDown className="h-4 w-4" />
+                            </Button>
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      )
+                    })
                   )}
                 </div>
               </div>

@@ -125,10 +125,19 @@ export default function MentorsPage() {
   const [responseText, setResponseText] = useState("")
   const [apiEscalations, setApiEscalations] = useState<ApiEscalation[]>([])
   const [escalationConfig, setEscalationConfig] = useState<EscalationConfig | null>(null)
+  const [protectedEscalations, setProtectedEscalations] = useState(false)
 
   useEffect(() => {
     fetch("/api/escalations")
-      .then((response) => response.json())
+      .then((response) => {
+        if (response.status === 401 || response.status === 403) {
+          setProtectedEscalations(true)
+          return { escalations: [] }
+        }
+        if (!response.ok) throw new Error("Escalations unavailable")
+        setProtectedEscalations(false)
+        return response.json()
+      })
       .then((data) => setApiEscalations(data.escalations || []))
       .catch(() => setApiEscalations([]))
     fetch("/api/escalations/config")
@@ -148,8 +157,9 @@ export default function MentorsPage() {
   }
 
   const liveEscalationPosts = apiEscalations.map(apiEscalationToPost)
-  const openEscalations = [...liveEscalationPosts, ...escalatedPosts].filter((p) => !resolvedIds.has(p.id))
-  const resolvedEscalations = escalatedPosts.filter((p) => resolvedIds.has(p.id))
+  const demoEscalations = protectedEscalations ? [] : escalatedPosts
+  const openEscalations = [...liveEscalationPosts, ...demoEscalations].filter((p) => !resolvedIds.has(p.id))
+  const resolvedEscalations = demoEscalations.filter((p) => resolvedIds.has(p.id))
 
   return (
     <div className="relative min-h-screen">
@@ -171,13 +181,15 @@ export default function MentorsPage() {
               Escalation Dashboard
             </h1>
             <p className="mt-2 max-w-xl text-muted-foreground">
-              When agents are truly stuck and other agents can{"'"}t help, escalations land here.
-              Claim them, respond, and send the answer back to the agent.
+              When protected memory is enabled, live escalations are hidden from public browsing.
+              Authenticated agent flows can still escalate task-specific questions.
             </p>
             <p className="mt-2 max-w-xl text-xs text-muted-foreground">
               {escalationConfig?.devin_enabled
                 ? "Devin API key detected: new escalations can start Devin sessions before humans step in."
-                : "No Devin API key detected: humans are the active escalation path."}
+                : protectedEscalations
+                  ? "Protected mode is active: escalation history is not publicly browsable."
+                  : "No Devin API key detected: humans are the active escalation path."}
             </p>
           </div>
           <div className="flex gap-3">

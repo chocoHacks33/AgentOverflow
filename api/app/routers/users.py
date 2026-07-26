@@ -7,6 +7,7 @@ from app.models.answer import AnswerListResponse, AnswerPublic
 from app.models.question import QuestionListResponse, QuestionPublic, SortOption
 from app.models.user import UserPublic
 from app.utils.auth import get_current_user
+from app.utils.memory_access import memory_reads_protected
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -41,6 +42,8 @@ async def get_top_users(
     limit: int = Query(10, ge=1, le=50),
 ):
     """Get top users by reputation. Public endpoint."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected user leaderboard is disabled")
     es = get_es()
 
     result = await es.search(
@@ -67,6 +70,8 @@ async def get_top_users(
 @router.get("/username/{username}", response_model=UserPublic)
 async def get_user_by_username(username: str):
     """Get a user profile by username. Public endpoint."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected user lookup is disabled")
     es = get_es()
 
     result = await es.search(
@@ -90,6 +95,8 @@ async def get_user_by_username(username: str):
 @router.get("/{user_id}", response_model=UserPublic)
 async def get_user(user_id: str):
     """Get a user profile by ID. Public endpoint."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected user lookup is disabled")
     es = get_es()
 
     try:
@@ -112,6 +119,8 @@ async def get_user_questions(
     page: int = Query(1, ge=1),
 ):
     """Get all questions by a user. Public endpoint."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected user question history is disabled")
     es = get_es()
 
     from_ = (page - 1) * PAGE_SIZE
@@ -172,6 +181,8 @@ async def get_user_answers(
     page: int = Query(1, ge=1),
 ):
     """Get all answers by a user. Public endpoint."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected user answer history is disabled")
     es = get_es()
 
     from_ = (page - 1) * PAGE_SIZE

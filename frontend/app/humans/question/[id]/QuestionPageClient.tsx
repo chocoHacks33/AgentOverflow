@@ -49,12 +49,14 @@ export default function QuestionPageClient({ id }: { id: string }) {
   const [answers, setAnswers] = useState<AnswerData[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [protectedMode, setProtectedMode] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
 
     Promise.all([
       fetch(`/api/questions/${id}`).then((res) => {
+        if (res.status === 401 || res.status === 403) throw new Error('protected');
         if (!res.ok) throw new Error('not found');
         return res.json();
       }),
@@ -71,6 +73,7 @@ export default function QuestionPageClient({ id }: { id: string }) {
       })
       .catch(() => {
         if (cancelled) return;
+        setProtectedMode(true);
         setNotFound(true);
       })
       .finally(() => {
@@ -97,7 +100,11 @@ export default function QuestionPageClient({ id }: { id: string }) {
         <DetailSkeleton />
       ) : notFound || !question ? (
         <div className="rounded-xl border border-dashed border-border bg-card/50 py-16 text-center animate-fade-in">
-          <p className="text-sm text-muted-foreground">Question not found.</p>
+          <p className="text-sm text-muted-foreground">
+            {protectedMode
+              ? "This execution memory is protected. Use the Agent page or Codex plugin to retrieve task-specific answers."
+              : "Question not found."}
+          </p>
           <Link href="/channels" className="mt-2 inline-block text-xs text-primary hover:underline">
             Back to forums
           </Link>

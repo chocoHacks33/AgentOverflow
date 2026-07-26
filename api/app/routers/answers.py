@@ -10,6 +10,7 @@ from app.models.question import SortOption
 from app.models.verification import VerificationPublic, VerificationRequest
 from app.services.sandbox import extract_python_blocks, verify_code
 from app.utils.auth import get_current_user, get_optional_user
+from app.utils.memory_access import memory_reads_protected, verify_question_access_token
 
 router = APIRouter(tags=["answers"])
 
@@ -54,6 +55,7 @@ def _hit_to_answer(hit: dict, user_vote: str | None = None) -> AnswerPublic:
 async def create_answer(
     question_id: str,
     body: AnswerCreateRequest,
+    access_token: str | None = Query(None),
     user: dict = Depends(get_current_user),
 ):
     """Create an answer to a question. Requires authentication."""
@@ -61,9 +63,12 @@ async def create_answer(
 
     # Validate question exists
     try:
-        await es.get(index="questions", id=question_id)
+        question = await es.get(index="questions", id=question_id)
     except Exception:
         raise HTTPException(status_code=404, detail="Question not found")
+
+    if memory_reads_protected() and question["_source"].get("author_id") != user["id"]:
+        verify_question_access_token(access_token, question_id, user["id"])
 
     now = datetime.now(timezone.utc)
 
@@ -112,16 +117,23 @@ async def list_answers(
     question_id: str,
     sort: SortOption = Query(SortOption.top),
     page: int = Query(1, ge=1),
-    user: dict | None = Depends(get_optional_user),
+    access_token: str | None = Query(None),
+    user: dict = Depends(get_current_user),
 ):
     """List answers for a question. Default sort: top (by score)."""
     es = get_es()
 
     # Validate question exists
     try:
-        await es.get(index="questions", id=question_id)
+        question = await es.get(index="questions", id=question_id)
     except Exception:
         raise HTTPException(status_code=404, detail="Question not found")
+
+    if memory_reads_protected():
+        if page != 1:
+            raise HTTPException(status_code=403, detail="Protected answer retrieval only returns the first page")
+        if question["_source"].get("author_id") != user["id"]:
+            verify_question_access_token(access_token, question_id, user["id"])
 
     from_ = (page - 1) * PAGE_SIZE
 
@@ -138,11 +150,11 @@ async def list_answers(
         query={"term": {"question_id": question_id}},
         sort=sort_clause,
         from_=from_,
-        size=PAGE_SIZE,
+        size=min(PAGE_SIZE, 4) if memory_reads_protected() else PAGE_SIZE,
     )
 
     total = result["hits"]["total"]["value"]
-    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+    total_pages = 1 if memory_reads_protected() else max(1, math.ceil(total / PAGE_SIZE))
 
     # If authenticated, fetch the user's votes on these answers
     answers = result["hits"]["hits"]
@@ -178,7 +190,8 @@ async def list_answers(
 @router.get("/answers/{answer_id}", response_model=AnswerPublic)
 async def get_answer(
     answer_id: str,
-    user: dict | None = Depends(get_optional_user),
+    access_token: str | None = Query(None),
+    user: dict = Depends(get_current_user),
 ):
     """Get a single answer by ID. Public endpoint."""
     es = get_es()
@@ -187,6 +200,18 @@ async def get_answer(
         result = await es.get(index="answers", id=answer_id)
     except Exception:
         raise HTTPException(status_code=404, detail="Answer not found")
+
+    if memory_reads_protected():
+        question_id = result["_source"]["question_id"]
+        try:
+            question = await es.get(index="questions", id=question_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Question not found")
+        if (
+            question["_source"].get("author_id") != user["id"]
+            and result["_source"].get("author_id") != user["id"]
+        ):
+            verify_question_access_token(access_token, question_id, user["id"])
 
     # Check if authenticated user has voted on this answer
     user_vote = None
@@ -217,6 +242,8 @@ async def verify_answer(
         raise HTTPException(status_code=404, detail="Answer not found")
 
     src = answer["_source"]
+    if memory_reads_protected() and src.get("author_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the answer author can verify protected memory")
     code = body.code
     if code is None:
         blocks = extract_python_blocks(src["body"])

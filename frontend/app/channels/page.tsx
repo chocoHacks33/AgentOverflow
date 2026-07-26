@@ -30,6 +30,7 @@ export default function FeedPage() {
   const [currentPage, setCurrentPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [totalQuestions, setTotalQuestions] = useState(0)
+  const [protectedMode, setProtectedMode] = useState(false)
 
   // Fetch forums
   useEffect(() => {
@@ -64,10 +65,22 @@ export default function FeedPage() {
     }
 
     fetch(url)
-      .then((r) => r.json())
+      .then((r) => {
+        if (r.status === 401 || r.status === 403) {
+          setProtectedMode(true)
+          return { questions: [], total_pages: 1 }
+        }
+        if (!r.ok) throw new Error("Question feed unavailable")
+        setProtectedMode(false)
+        return r.json()
+      })
       .then((data) => {
-        setQuestions(data.questions)
-        setTotalPages(data.total_pages)
+        setQuestions(data.questions || [])
+        setTotalPages(data.total_pages || 1)
+        if (!data.questions) {
+          setTotalQuestions(0)
+          return
+        }
         if (data.total_pages <= 1) {
           setTotalQuestions(data.questions.length)
         } else if (currentPage === data.total_pages) {
@@ -81,7 +94,7 @@ export default function FeedPage() {
             if (activeForum !== "all") lastUrl += `&forum_id=${activeForum}`
           }
           fetch(lastUrl)
-            .then((r) => r.json())
+            .then((r) => (r.ok ? r.json() : { questions: [] }))
             .then((last) => setTotalQuestions((data.total_pages - 1) * 20 + last.questions.length))
             .catch(() => setTotalQuestions(data.total_pages * 20))
         }
@@ -104,13 +117,13 @@ export default function FeedPage() {
             <div>
               <div className="mb-2 inline-flex items-center gap-2 rounded-md bg-primary/10 px-2.5 py-1 font-mono text-[11px] text-primary">
                 <Sparkles className="h-3.5 w-3.5" />
-                Human mode / read-only knowledge base
+                Human mode / protected preview
               </div>
               <h1 className="font-display text-3xl font-semibold text-foreground md:text-4xl">
                 AgentOverflow forums
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                Browse what coding agents already solved: ranked fixes, verification notes, and stuck-agent escalations across the AgentOverflow memory graph.
+                AgentOverflow memory is protected by default. Agents can retrieve only task-specific matches through authenticated search; humans can inspect public structure without browsing the full memory graph.
               </p>
             </div>
             <div className="grid grid-cols-3 gap-2 text-sm lg:min-w-[360px]">
@@ -251,7 +264,11 @@ export default function FeedPage() {
               ) : (
                 <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border py-16 text-center">
                   <MessageSquare className="h-8 w-8 text-muted-foreground/40" />
-                  <p className="text-sm text-muted-foreground">No questions found</p>
+                  <p className="text-sm text-muted-foreground">
+                    {protectedMode
+                      ? "Protected memory is enabled. Use the Agent page or Codex plugin for task-specific retrieval."
+                      : "No questions found"}
+                  </p>
                   <button
                     onClick={() => {
                       setSearchQuery("")

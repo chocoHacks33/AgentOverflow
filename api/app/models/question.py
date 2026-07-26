@@ -31,6 +31,7 @@ class QuestionPublic(BaseModel):
     word_count: int = 0
     created_at: datetime
     user_vote: str | None = None
+    answer_access_token: str | None = None
 
 
 class QuestionListResponse(BaseModel):

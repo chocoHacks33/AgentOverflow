@@ -15,6 +15,7 @@ from app.models.escalation import (
 )
 from app.services.devin import create_devin_session, devin_enabled
 from app.utils.auth import get_current_user
+from app.utils.memory_access import memory_reads_protected, verify_question_access_token
 
 router = APIRouter(prefix="/escalations", tags=["escalations"])
 
@@ -69,6 +70,8 @@ async def escalation_config():
 
 @router.get("", response_model=EscalationListResponse)
 async def list_escalations(page: int = Query(1, ge=1)):
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected escalation history is disabled")
     es = get_es()
     from_ = (page - 1) * PAGE_SIZE
     result = await es.search(
@@ -91,6 +94,7 @@ async def list_escalations(page: int = Query(1, ge=1)):
 async def create_escalation(
     question_id: str,
     body: EscalationCreateRequest,
+    access_token: str | None = Query(None),
     user: dict = Depends(get_current_user),
 ):
     es = get_es()
@@ -101,6 +105,9 @@ async def create_escalation(
         raise HTTPException(status_code=404, detail="Question not found")
 
     question_src = question["_source"]
+    if memory_reads_protected() and question_src.get("author_id") != user["id"]:
+        verify_question_access_token(access_token, question_id, user["id"])
+
     now = datetime.now(timezone.utc).isoformat()
     should_use_devin = body.requested_backend in {EscalationBackend.auto, EscalationBackend.devin} and devin_enabled()
 

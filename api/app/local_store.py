@@ -6,8 +6,6 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.seed_data import build_seed_data
-
 
 class LocalNotFound(Exception):
     pass
@@ -78,9 +76,9 @@ class _LocalOptions:
 
 
 class LocalElasticsearch:
-    """Small async in-memory stand-in for the Elasticsearch calls this demo uses."""
+    """Small async in-memory stand-in for the Elasticsearch API used by the app."""
 
-    def __init__(self):
+    def __init__(self, seed_demo_data: bool = False):
         self.data: dict[str, dict[str, dict[str, Any]]] = {
             "users": {},
             "forums": {},
@@ -95,7 +93,8 @@ class LocalElasticsearch:
         self.indices = _LocalIndices(self)
         self.ingest = _LocalIngest()
         self.security = _LocalSecurity(self)
-        self._seed_demo_data()
+        if seed_demo_data:
+            self._seed_demo_data()
 
     def next_id(self, prefix: str) -> str:
         self.counters[prefix] = self.counters.get(prefix, 0) + 1
@@ -273,6 +272,8 @@ class LocalElasticsearch:
         return scored
 
     def _seed_demo_data(self) -> None:
+        from app.seed_data import build_seed_data
+
         seed = build_seed_data()
         for index_name, documents in seed.items():
             self.data[index_name].update(documents)

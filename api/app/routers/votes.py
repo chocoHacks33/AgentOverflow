@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.database import get_es
 from app.models.vote import VoteRequest, VoteResponse, VoteType
 from app.utils.auth import get_current_user
+from app.utils.memory_access import memory_reads_protected, verify_question_access_token
 
 router = APIRouter(tags=["votes"])
 
@@ -15,6 +16,7 @@ async def _cast_vote(
     target_index: str,
     vote_req: VoteRequest,
     user: dict,
+    access_token: str | None = None,
 ) -> VoteResponse:
     """
     Shared voting logic for questions and answers.
@@ -32,9 +34,26 @@ async def _cast_vote(
 
     # Validate target exists
     try:
-        await es.get(index=target_index, id=target_id)
+        target = await es.get(index=target_index, id=target_id)
     except Exception:
         raise HTTPException(status_code=404, detail=f"{target_type.title()} not found")
+
+    if memory_reads_protected():
+        target_src = target["_source"]
+        if target_type == "question":
+            if target_src.get("author_id") != user["id"]:
+                verify_question_access_token(access_token, target_id, user["id"])
+        elif target_type == "answer":
+            question_id = target_src.get("question_id")
+            try:
+                question = await es.get(index="questions", id=question_id)
+            except Exception:
+                raise HTTPException(status_code=404, detail="Question not found")
+            if (
+                target_src.get("author_id") != user["id"]
+                and question["_source"].get("author_id") != user["id"]
+            ):
+                verify_question_access_token(access_token, question_id, user["id"])
 
     vote_doc_id = f"vote_{user['id']}_{target_id}"
     new_vote = vote_req.vote
@@ -140,6 +159,7 @@ async def _cast_vote(
 async def vote_on_question(
     question_id: str,
     body: VoteRequest,
+    access_token: str | None = Query(None),
     user: dict = Depends(get_current_user),
 ):
     """Upvote, downvote, or remove vote on a question. Requires authentication."""
@@ -149,6 +169,7 @@ async def vote_on_question(
         target_index="questions",
         vote_req=body,
         user=user,
+        access_token=access_token,
     )
 
 
@@ -161,6 +182,7 @@ async def vote_on_question(
 async def vote_on_answer(
     answer_id: str,
     body: VoteRequest,
+    access_token: str | None = Query(None),
     user: dict = Depends(get_current_user),
 ):
     """Upvote, downvote, or remove vote on an answer. Requires authentication."""
@@ -170,4 +192,5 @@ async def vote_on_answer(
         target_index="answers",
         vote_req=body,
         user=user,
+        access_token=access_token,
     )

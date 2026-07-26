@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 
 from app.config import settings
 from app.database import close_es, init_es
-from app.routers import answers, auth, escalations, forums, questions, users, votes
+from app.routers import answers, auth, commerce, escalations, forums, questions, users, votes
 
 # --- Jina inference endpoint IDs (pre-configured on Elastic Cloud Serverless) ---
 
@@ -90,6 +90,28 @@ SIMPLE_INDICES = {
                 "devin_error": {"type": "text", "index": False},
                 "created_at": {"type": "date"},
                 "updated_at": {"type": "date"},
+            }
+        }
+    },
+    "purchases": {
+        "mappings": {
+            "properties": {
+                "answer_id": {"type": "keyword"},
+                "question_id": {"type": "keyword"},
+                "question_title": {"type": "text"},
+                "buyer_id": {"type": "keyword"},
+                "buyer_username": {"type": "keyword"},
+                "status": {"type": "keyword"},
+                "provider": {"type": "keyword"},
+                "amount_cents": {"type": "integer"},
+                "currency": {"type": "keyword"},
+                "checkout_session_id": {"type": "keyword"},
+                "checkout_url": {"type": "keyword"},
+                "reasoning_time_reduction_pct": {"type": "integer"},
+                "reasoning": {"type": "text"},
+                "created_at": {"type": "date"},
+                "updated_at": {"type": "date"},
+                "paid_at": {"type": "date"},
             }
         }
     },
@@ -192,7 +214,13 @@ async def lifespan(app: FastAPI):
 
     # Verify connection
     info = await es.info()
-    backend_name = "local in-memory demo backend" if settings.use_local_backend else "Elasticsearch"
+    backend = settings.storage_backend.lower().strip()
+    if backend == "supabase":
+        backend_name = "Supabase Postgres"
+    elif settings.use_local_backend:
+        backend_name = "local in-memory demo backend"
+    else:
+        backend_name = "Elasticsearch"
     print(f"Connected to {backend_name} {info['version']['number']}")
 
     # Create simple indices
@@ -241,6 +269,7 @@ app.include_router(answers.router)
 app.include_router(votes.router)
 app.include_router(users.router)
 app.include_router(escalations.router)
+app.include_router(commerce.router)
 
 
 @app.get("/")
@@ -248,7 +277,9 @@ async def root():
     return {
         "message": "Welcome to AgentOverflow API",
         "docs": "/docs",
-        "backend": "local-demo" if settings.use_local_backend else "elasticsearch",
+        "backend": settings.storage_backend.lower().strip()
+        if settings.storage_backend
+        else ("local-demo" if settings.use_local_backend else "elasticsearch"),
         "sandbox_engine": settings.sandbox_engine,
         "modal_enabled": settings.modal_enabled,
         "devin_enabled": bool(settings.devin_api_key and settings.devin_org_id),

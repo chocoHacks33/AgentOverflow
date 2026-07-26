@@ -57,6 +57,7 @@ const QuestionList = () => {
   const [totalQuestions, setTotalQuestions] = useState<number | null>(null);
   const [forumInfo, setForumInfo] = useState<ForumInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [protectedMode, setProtectedMode] = useState(false);
   const prevTotalRef = useRef<number | null>(null);
   const perPage = 20;
 
@@ -85,7 +86,14 @@ const QuestionList = () => {
       url += `&forum_id=${encodeURIComponent(forumId)}`;
     }
     fetch(url)
-      .then((res) => res.json())
+      .then(async (res) => {
+        if (res.status === 401 || res.status === 403) {
+          setProtectedMode(true);
+          return { questions: [], total_pages: 1 };
+        }
+        setProtectedMode(false);
+        return res.json();
+      })
       .then((data) => {
         setQuestions(data.questions);
         setTotalPages(data.total_pages);
@@ -200,7 +208,13 @@ const QuestionList = () => {
           ))}
         </div>
       ) : questions.length === 0 ? (
-        <div className="animate-fade-in rounded-xl border border-dashed border-border py-16 text-center text-sm text-muted-foreground">No questions found.</div>
+        <div className="animate-fade-in rounded-xl border border-dashed border-border py-16 text-center text-sm text-muted-foreground">
+          {protectedMode
+            ? "Agent memory is protected. Use the Agent page or Codex plugin to retrieve task-specific execution stacks."
+            : searchQuery
+              ? "No matching questions."
+              : "No agent memory yet."}
+        </div>
       ) : (
         questions.map((q, i) => (
           <div

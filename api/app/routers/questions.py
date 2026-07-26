@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.config import settings
 from app.database import get_es
 from app.models.question import (
     QuestionCreateRequest,
@@ -11,19 +12,29 @@ from app.models.question import (
     SortOption,
 )
 from app.utils.auth import get_current_user, get_optional_user
+from app.utils.memory_access import (
+    create_question_access_token,
+    memory_reads_protected,
+    verify_question_access_token,
+)
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 
 PAGE_SIZE = 20
 
 
-def _hit_to_question(hit: dict, user_vote: str | None = None) -> QuestionPublic:
+def _hit_to_question(
+    hit: dict,
+    user_vote: str | None = None,
+    answer_access_token: str | None = None,
+    body_limit: int | None = None,
+) -> QuestionPublic:
     """Convert an ES search hit to a QuestionPublic response."""
     src = hit["_source"]
     return QuestionPublic(
         id=hit["_id"],
         title=src["title"],
-        body=src["body"],
+        body=src["body"][:body_limit] if body_limit else src["body"],
         forum_id=src["forum_id"],
         forum_name=src["forum_name"],
         author_id=src["author_id"],
@@ -36,6 +47,7 @@ def _hit_to_question(hit: dict, user_vote: str | None = None) -> QuestionPublic:
         word_count=src.get("word_count", 0),
         created_at=src["created_at"],
         user_vote=user_vote,
+        answer_access_token=answer_access_token,
     )
 
 
@@ -118,10 +130,10 @@ async def create_question(
 
 @router.get("/search", response_model=QuestionListResponse)
 async def search_questions(
-    q: str = Query(..., min_length=1, description="Search query"),
+    q: str = Query(..., min_length=12, max_length=900, description="Specific subtask search query"),
     forum_id: str | None = Query(None),
     page: int = Query(1, ge=1),
-    user: dict | None = Depends(get_optional_user),
+    user: dict = Depends(get_current_user),
 ):
     """
     Hybrid search combining three retrieval strategies via Reciprocal Rank Fusion:
@@ -136,8 +148,11 @@ async def search_questions(
     ES features used: RRF retriever, semantic query, custom analyzer, text_similarity_reranker
     """
     es = get_es()
+    if memory_reads_protected() and page != 1:
+        raise HTTPException(status_code=403, detail="Protected memory search only returns the first result page")
 
     from_ = (page - 1) * PAGE_SIZE
+    size = min(PAGE_SIZE, settings.max_memory_search_results) if memory_reads_protected() else PAGE_SIZE
 
     # Build RRF retriever: fuses keyword + semantic results
     rrf_retriever = {
@@ -200,7 +215,7 @@ async def search_questions(
             index="questions",
             retriever=retriever,
             from_=from_,
-            size=PAGE_SIZE,
+            size=size,
         )
     except Exception:
         # Fall back to RRF without reranker (if reranker not available)
@@ -208,14 +223,23 @@ async def search_questions(
             index="questions",
             retriever=rrf_retriever,
             from_=from_,
-            size=PAGE_SIZE,
+            size=size,
         )
 
     total = result["hits"]["total"]["value"]
-    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+    total_pages = 1 if memory_reads_protected() else max(1, math.ceil(total / PAGE_SIZE))
 
     return QuestionListResponse(
-        questions=[_hit_to_question(h) for h in result["hits"]["hits"]],
+        questions=[
+            _hit_to_question(
+                h,
+                answer_access_token=create_question_access_token(h["_id"], user["id"])
+                if memory_reads_protected()
+                else None,
+                body_limit=1200 if memory_reads_protected() else None,
+            )
+            for h in result["hits"]["hits"]
+        ],
         page=page,
         total_pages=total_pages,
     )
@@ -232,6 +256,8 @@ async def list_unanswered(
     page: int = Query(1, ge=1),
 ):
     """List questions that have no answers yet. Public endpoint."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected memory cannot be browsed")
     es = get_es()
 
     filters = [{"term": {"answer_count": 0}}]
@@ -273,7 +299,12 @@ async def list_questions(
 ):
     """List questions with optional forum filter and sorting. Public endpoint."""
     if search:
+        if not user:
+            raise HTTPException(status_code=401, detail="Agent API key required for memory search")
         return await search_questions(q=search, forum_id=forum_id, page=page, user=user)
+
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected memory cannot be browsed")
 
     es = get_es()
 
@@ -318,9 +349,14 @@ async def list_questions(
 @router.get("/{question_id}", response_model=QuestionPublic)
 async def get_question(
     question_id: str,
+    access_token: str | None = Query(None),
     user: dict | None = Depends(get_optional_user),
 ):
     """Get a single question by ID. Public endpoint."""
+    if memory_reads_protected():
+        if not user:
+            raise HTTPException(status_code=401, detail="Agent API key required")
+        verify_question_access_token(access_token, question_id, user["id"])
     es = get_es()
 
     try:
