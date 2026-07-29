@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
+import os
 
 from fastapi import HTTPException, Request
 
@@ -19,13 +21,21 @@ def _hash_key(value: str) -> str:
 
 
 def client_network_key(request: Request) -> str:
-    forwarded = (
-        request.headers.get("x-vercel-forwarded-for", "")
-        or request.headers.get("x-forwarded-for", "")
-    )
+    provider = settings.trusted_proxy_provider.strip().lower()
+    on_vercel = bool(settings.vercel_env or os.getenv("VERCEL"))
+    trust_vercel = provider == "vercel" or (provider == "auto" and on_vercel)
+    forwarded = request.headers.get("x-vercel-forwarded-for", "") if trust_vercel else ""
     candidate = forwarded.split(",", 1)[0].strip() if forwarded else ""
     if not candidate and request.client:
         candidate = request.client.host
+    try:
+        address = ipaddress.ip_address(candidate)
+        if address.version == 6:
+            candidate = str(ipaddress.ip_network(f"{address}/64", strict=False).network_address)
+        else:
+            candidate = str(address)
+    except ValueError:
+        candidate = request.client.host if request.client else "unknown-client"
     return _hash_key(candidate or "unknown-client")
 
 

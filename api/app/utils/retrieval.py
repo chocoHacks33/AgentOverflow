@@ -103,6 +103,32 @@ _STOPWORDS = {
     "work",
 }
 
+_TOKEN_ALIASES = {
+    "authn": "authentication",
+    "authz": "authorization",
+    "ci": "continuous-integration",
+    "cli": "command-line",
+    "db": "database",
+    "deps": "dependencies",
+    "js": "javascript",
+    "k8s": "kubernetes",
+    "postgres": "postgresql",
+    "py": "python",
+    "ts": "typescript",
+}
+
+
+def _is_signature_token(token: str) -> bool:
+    return (
+        len(token) >= 18
+        or (
+            len(token) >= 8
+            and any(char.isalpha() for char in token)
+            and any(char.isdigit() for char in token)
+        )
+        or (len(token) >= 8 and any(char in token for char in "._+#/-"))
+    )
+
 
 def normalized_tokens(text: str) -> list[str]:
     tokens: list[str] = []
@@ -110,7 +136,7 @@ def normalized_tokens(text: str) -> list[str]:
         token = raw.strip("./:-")
         if len(token) < 2 or token in _STOPWORDS:
             continue
-        tokens.append(token)
+        tokens.append(_TOKEN_ALIASES.get(token, token))
     return tokens
 
 
@@ -118,7 +144,7 @@ def query_is_specific(text: str) -> bool:
     tokens = normalized_tokens(text)
     unique = set(tokens)
     distinctive = [token for token in unique if len(token) >= 5 or any(char in token for char in "._+#/-")]
-    has_unique_signature = any(len(token) >= 10 for token in unique)
+    has_unique_signature = any(_is_signature_token(token) for token in unique)
     return (len(unique) >= 3 and len(distinctive) >= 2) or (
         len(unique) >= 2 and has_unique_signature
     )
@@ -141,7 +167,7 @@ def relevance_score(query: str, title: str, body: str, backend_score: float = 0.
     coverage = len(overlap) / max(1, min(len(query_set), 16))
     precision = len(overlap) / max(1, min(len(document_set), 40))
     exact_title = " ".join(query_tokens[:8]) in " ".join(document_tokens[:20])
-    unique_sentinel = any(len(token) >= 10 and token in document_set for token in query_set)
+    unique_sentinel = any(_is_signature_token(token) and token in document_set for token in query_set)
 
     lexical = min(1.0, (coverage * 0.68) + (precision * 0.22))
     backend = max(0.0, min(float(backend_score or 0.0), 1.0))
@@ -168,23 +194,24 @@ def is_relevant_match(
     signatures = {
         token
         for token in query_set
-        if len(token) >= 18
-        or (
-            len(token) >= 8
-            and any(char.isalpha() for char in token)
-            and any(char.isdigit() for char in token)
-        )
+        if _is_signature_token(token)
     }
     if signatures and not (signatures & document_set):
         return False
     overlap = query_set & document_set
+    coverage = len(overlap) / max(1, min(len(query_set), 16))
     distinctive = [
         token
         for token in overlap
         if len(token) >= 6 or any(char in token for char in "._+#/-")
     ]
-    has_unique_sentinel = any(len(token) >= 10 and token in document_set for token in query_set)
+    has_unique_sentinel = any(
+        _is_signature_token(token) and token in document_set
+        for token in query_set
+    )
     if len(overlap) < 2 and not has_unique_sentinel:
+        return False
+    if coverage < 0.30 and not has_unique_sentinel:
         return False
     if not distinctive and len(overlap) < 3:
         return False
@@ -195,6 +222,10 @@ def feature_hash_embedding(text: str, dimensions: int = VECTOR_DIMENSIONS) -> li
     tokens = normalized_tokens(text)
     features = list(tokens)
     features.extend(f"{left}::{right}" for left, right in zip(tokens, tokens[1:]))
+    for token in set(tokens):
+        compact = re.sub(r"[^a-z0-9+#.]", "", token)
+        if len(compact) >= 5:
+            features.extend(f"char:{compact[index:index + 4]}" for index in range(len(compact) - 3))
     if not features:
         return [0.0] * dimensions
 

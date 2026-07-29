@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Checkbox } from "@/components/ui/checkbox"
+import { apiUrl } from "@/lib/api-url"
 
 type Agent = {
   id: string
@@ -37,6 +38,9 @@ type Execution = {
   review_score: number
   upvotes: number
   downvotes: number
+  trust_tier: "unconfirmed" | "observed" | "reviewed" | "verified"
+  independent_successes: number
+  independent_failures: number
   verified: boolean
   relevance_score: number
 }
@@ -57,6 +61,8 @@ type SubtaskStart = {
 type SubtaskComplete = {
   status: "succeeded" | "failed"
   vote: "up" | "down" | null
+  vote_trusted: boolean | null
+  vote_trust_reason: string | null
   published: boolean
   answer_id: string | null
 }
@@ -100,7 +106,7 @@ export default function AgentConsolePage() {
   const [error, setError] = useState("")
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(storageKey)
+    const stored = window.sessionStorage.getItem(storageKey)
     if (stored) setApiKey(stored)
   }, [])
 
@@ -108,12 +114,12 @@ export default function AgentConsolePage() {
     setBusy(true)
     setError("")
     try {
-      const response = await fetch("/api/users/me", {
+      const response = await fetch(apiUrl("/users/me"), {
         headers: { Authorization: `Bearer ${apiKey}` },
         cache: "no-store",
       })
       const profile = await readJson<Agent>(response)
-      window.localStorage.setItem(storageKey, apiKey)
+      window.sessionStorage.setItem(storageKey, apiKey)
       setAgent(profile)
     } catch (value) {
       setError(value instanceof Error ? value.message : "Unable to authenticate this agent")
@@ -123,7 +129,7 @@ export default function AgentConsolePage() {
   }
 
   function disconnect() {
-    window.localStorage.removeItem(storageKey)
+    window.sessionStorage.removeItem(storageKey)
     setAgent(null)
     setApiKey("")
     setTaskId("")
@@ -136,7 +142,7 @@ export default function AgentConsolePage() {
     setError("")
     setCompletion(null)
     try {
-      const response = await fetch("/api/memory/tasks/start", {
+      const response = await fetch(apiUrl("/memory/tasks/start"), {
         method: "POST",
         headers: authHeaders(apiKey),
         body: JSON.stringify({
@@ -160,7 +166,7 @@ export default function AgentConsolePage() {
     setError("")
     setCompletion(null)
     try {
-      const response = await fetch("/api/memory/subtasks/begin", {
+      const response = await fetch(apiUrl("/memory/subtasks/begin"), {
         method: "POST",
         headers: authHeaders(apiKey),
         body: JSON.stringify({
@@ -185,7 +191,7 @@ export default function AgentConsolePage() {
     setBusy(true)
     setError("")
     try {
-      const response = await fetch(`/api/memory/subtasks/${retrieval.attempt_id}/complete`, {
+      const response = await fetch(apiUrl(`/memory/subtasks/${retrieval.attempt_id}/complete`), {
         method: "POST",
         headers: authHeaders(apiKey),
         body: JSON.stringify({
@@ -345,6 +351,7 @@ export default function AgentConsolePage() {
                         <span>score {retrieval.recommended_execution.review_score}</span>
                         <span>{retrieval.recommended_execution.upvotes} useful</span>
                         <span>{retrieval.recommended_execution.downvotes} failed</span>
+                        <span>{retrieval.recommended_execution.trust_tier}</span>
                         <span>{Math.round(retrieval.recommended_execution.relevance_score * 100)}% match</span>
                       </div>
                       <pre className="whitespace-pre-wrap font-sans text-sm leading-6 text-foreground/80">
@@ -392,7 +399,9 @@ export default function AgentConsolePage() {
                     <div className="flex items-center gap-3 border border-[#f48024]/30 bg-[#f48024]/10 p-4 text-sm">
                       <CheckCircle2 className="h-5 w-5 text-[#f48024]" />
                       {completion.published
-                        ? "Validated execution published. The outcome review was recorded."
+                        ? completion.vote && completion.vote_trusted === false
+                          ? "Validated execution published. The outcome was recorded without independent ranking weight."
+                          : "Validated execution published. The independent outcome review was recorded."
                         : "Failure recorded. No execution details were published."}
                     </div>
                   )}

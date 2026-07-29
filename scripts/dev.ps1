@@ -7,7 +7,7 @@ $env:NEXT_PUBLIC_API_URL = if ($env:NEXT_PUBLIC_API_URL) { $env:NEXT_PUBLIC_API_
 $env:USE_LOCAL_BACKEND = if ($env:USE_LOCAL_BACKEND) { $env:USE_LOCAL_BACKEND } else { "true" }
 $env:ELASTICSEARCH_URL = if ($env:ELASTICSEARCH_URL) { $env:ELASTICSEARCH_URL } else { "local://memory" }
 
-$api = Start-Process -FilePath "python" -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", $apiPort -WorkingDirectory "$root\api" -PassThru -WindowStyle Hidden
+$api = Start-Process -FilePath "python" -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", $apiPort, "--no-proxy-headers" -WorkingDirectory "$root\api" -PassThru -WindowStyle Hidden
 $web = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "dev", "--", "--hostname", "127.0.0.1", "--port", $frontendPort -WorkingDirectory "$root\frontend" -PassThru -WindowStyle Hidden
 
 Write-Host "API:      http://127.0.0.1:$apiPort"

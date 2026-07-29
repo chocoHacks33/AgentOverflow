@@ -1,13 +1,18 @@
 import { createInterface } from "node:readline";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 
 const SERVER_NAME = "agentoverflow";
 const SERVER_VERSION = "0.1.0";
-const DEFAULT_API_URL = "https://agentoverflow-eta.vercel.app/api";
+const DEFAULT_API_URL = "https://api-swart-pi-60.vercel.app";
 const DEFAULT_WEB_URL = "https://agentoverflow-eta.vercel.app";
 
 const state = {
   apiKey: process.env.AGENTOVERFLOW_API_KEY?.trim() || "",
+  apiKeySource: process.env.AGENTOVERFLOW_API_KEY?.trim() ? "environment" : null,
+  credentialLoadAttempted: false,
   user: null,
   session: null,
   subtaskCounter: 0,
@@ -41,6 +46,94 @@ function questionUrl(questionId) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function credentialFile() {
+  const configured = process.env.AGENTOVERFLOW_CREDENTIALS_FILE?.trim();
+  if (configured) {
+    return nodePath.resolve(configured);
+  }
+  return nodePath.join(os.homedir(), ".agentoverflow", "credentials.json");
+}
+
+async function loadPersistedIdentity() {
+  if (state.credentialLoadAttempted || state.apiKey) {
+    return;
+  }
+  state.credentialLoadAttempted = true;
+  const file = credentialFile();
+  try {
+    const stat = await fs.lstat(file);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 4096) {
+      throw new Error("AgentOverflow credential file failed local integrity checks.");
+    }
+    const parsed = JSON.parse(await fs.readFile(file, "utf8"));
+    const key = String(parsed.api_key || "").trim();
+    if (
+      parsed.api_url !== apiBase() ||
+      !/^[A-Za-z0-9._~+/=-]{20,512}$/.test(key)
+    ) {
+      throw new Error("AgentOverflow credential file does not match this service.");
+    }
+    state.apiKey = key;
+    state.apiKeySource = "credential_file";
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function clearPersistedIdentity() {
+  const file = credentialFile();
+  try {
+    const stat = await fs.lstat(file);
+    if (stat.isSymbolicLink()) {
+      throw new Error("Refusing to remove a symlinked AgentOverflow credential file.");
+    }
+    await fs.unlink(file);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function persistIdentity(apiKey, user) {
+  const file = credentialFile();
+  const directory = nodePath.dirname(file);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  try {
+    const directoryStat = await fs.lstat(directory);
+    if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+      throw new Error("AgentOverflow credential directory failed local integrity checks.");
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const payload = `${JSON.stringify(
+    {
+      version: 1,
+      api_url: apiBase(),
+      api_key: apiKey,
+      user_id: user.id,
+      username: user.username,
+      created_at: nowIso(),
+    },
+    null,
+    2
+  )}\n`;
+  await fs.writeFile(temporary, payload, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try {
+    await fs.rename(temporary, file);
+    await fs.chmod(file, 0o600).catch(() => {});
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => {});
+    throw error;
+  }
 }
 
 function compactText(value, maxLength) {
@@ -129,9 +222,23 @@ async function ensureIdentity() {
     return state.user;
   }
 
+  await loadPersistedIdentity();
   if (state.apiKey) {
-    state.user = await apiRequest("/users/me", { auth: true });
-    return state.user;
+    try {
+      state.user = await apiRequest("/users/me", { auth: true });
+      return state.user;
+    } catch (error) {
+      if (
+        !(error instanceof ApiError) ||
+        ![401, 404].includes(error.status) ||
+        state.apiKeySource !== "credential_file"
+      ) {
+        throw error;
+      }
+      await clearPersistedIdentity();
+      state.apiKey = "";
+      state.apiKeySource = null;
+    }
   }
 
   if ((process.env.AGENTOVERFLOW_AUTO_REGISTER || "true").toLowerCase() === "false") {
@@ -144,7 +251,11 @@ async function ensureIdentity() {
     .toString(36)
     .slice(2, 6)}`;
   const username = `CodexAO_${suffix}`.slice(0, 30);
-  const challenge = await apiRequest("/auth/challenge", { method: "POST" });
+  const enrollmentToken = process.env.AGENTOVERFLOW_ENROLLMENT_TOKEN?.trim() || "";
+  const challenge = await apiRequest("/auth/challenge", {
+    method: "POST",
+    body: enrollmentToken ? { enrollment_token: enrollmentToken } : {},
+  });
   const challengeProof = solveRegistrationProof(
     challenge.challenge_token,
     challenge.difficulty_bits
@@ -155,10 +266,14 @@ async function ensureIdentity() {
       username,
       challenge_token: challenge.challenge_token,
       challenge_proof: challengeProof,
+      ...(enrollmentToken ? { enrollment_token: enrollmentToken } : {}),
     },
   });
   state.apiKey = registration.api_key;
+  state.apiKeySource = "credential_file";
   state.user = registration.user;
+  await persistIdentity(state.apiKey, state.user);
+  delete process.env.AGENTOVERFLOW_ENROLLMENT_TOKEN;
   return state.user;
 }
 
@@ -368,7 +483,12 @@ async function completeSubtask(args) {
       }
     );
     const voteResult = completed.vote
-      ? { vote: completed.vote, status: "recorded" }
+      ? {
+          vote: completed.vote,
+          status: "recorded",
+          trusted_for_ranking: completed.vote_trusted,
+          trust_reason: completed.vote_trust_reason,
+        }
       : null;
     subtask.status = "failed";
     subtask.completedAt = nowIso();
@@ -388,19 +508,19 @@ async function completeSubtask(args) {
     };
   }
 
-  const rationale = markdownText(args.rationale_summary, 2500);
-  const result = markdownText(args.result, 3000);
-  const validation = markdownText(args.validation, 4000);
+  const rationale = markdownText(args.rationale_summary, 800);
+  const result = markdownText(args.result, 1000);
+  const validation = markdownText(args.validation, 1200);
   const steps = Array.isArray(args.execution_steps)
-    ? args.execution_steps.map((step) => markdownText(step, 1500)).filter(Boolean)
+    ? args.execution_steps.map((step) => markdownText(step, 400)).filter(Boolean)
     : [];
   if (!rationale || !result || !validation || !steps.length) {
     throw new Error(
       "Successful subtasks require rationale_summary, execution_steps, result, and validation."
     );
   }
-  if (steps.length > 16) {
-    throw new Error("Keep execution_steps to 16 or fewer reusable steps.");
+  if (steps.length > 12) {
+    throw new Error("Keep execution_steps to 12 or fewer reusable steps.");
   }
   assertPublicText([rationale, result, validation, steps]);
   const completed = await apiRequest(
@@ -419,7 +539,12 @@ async function completeSubtask(args) {
     }
   );
   const voteResult = completed.vote
-    ? { vote: completed.vote, status: "recorded" }
+    ? {
+        vote: completed.vote,
+        status: "recorded",
+        trusted_for_ranking: completed.vote_trusted,
+        trust_reason: completed.vote_trust_reason,
+      }
     : null;
   if (usedAnswerId && voteResult) {
     recordEvent("execution_reviewed", {
@@ -543,6 +668,7 @@ async function taskSummary() {
     matches_found: subtask.candidates.length,
     reused_answer_id: subtask.usedAnswerId || null,
     vote: subtask.vote?.vote || null,
+    vote_trusted: subtask.vote?.trusted_for_ranking ?? null,
     published_answer_id: subtask.publishedAnswerId || null,
     question_url: subtask.questionUrl,
   }));
@@ -662,7 +788,7 @@ const tools = [
         execution_steps: {
           type: "array",
           items: { type: "string" },
-          maxItems: 16,
+          maxItems: 12,
           description:
             "On success, ordered concrete actions another agent can reproduce.",
         },

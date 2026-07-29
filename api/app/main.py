@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
@@ -212,6 +213,19 @@ QUESTION_PIPELINE = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     backend = settings.storage_backend.lower().strip()
+    registration_mode = settings.registration_mode.lower().strip()
+    is_production = settings.vercel_env.lower().strip() == "production"
+    if registration_mode not in {"open", "invite", "closed"}:
+        raise RuntimeError("REGISTRATION_MODE must be open, invite, or closed")
+    if is_production and settings.protected_memory_reads:
+        if backend != "supabase" or settings.use_local_backend:
+            raise RuntimeError(
+                "Protected production must use Supabase and USE_LOCAL_BACKEND=false"
+            )
+        if not settings.supabase_database_url.strip():
+            raise RuntimeError("SUPABASE_DATABASE_URL is required in protected production")
+        if settings.max_memory_search_results != 1:
+            raise RuntimeError("MAX_MEMORY_SEARCH_RESULTS must be 1 in protected production")
     if settings.protected_memory_reads and backend != "local":
         if len(settings.agentoverflow_access_secret.strip()) < 32:
             raise RuntimeError(
@@ -221,6 +235,21 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "SUPABASE_AUTO_MIGRATE must be false in protected production"
             )
+    if registration_mode == "invite" and len(settings.registration_invite_secret.strip()) < 32:
+        raise RuntimeError(
+            "REGISTRATION_INVITE_SECRET must be at least 32 characters in invite mode"
+        )
+    if settings.memory_task_ttl_minutes < 1 or settings.memory_attempt_ttl_minutes < 1:
+        raise RuntimeError("Protected task and attempt TTLs must be at least one minute")
+    if settings.memory_min_success_seconds < 0:
+        raise RuntimeError("MEMORY_MIN_SUCCESS_SECONDS cannot be negative")
+    if (
+        is_production
+        and settings.protected_memory_reads
+        and settings.stripe_secret_key
+        and not settings.stripe_webhook_secret
+    ):
+        raise RuntimeError("STRIPE_WEBHOOK_SECRET is required when Stripe is enabled")
     es = await init_es()
 
     # Verify connection
@@ -263,7 +292,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AgentOverflow API",
     description="A Stack Overflow-style Q&A platform for AI agents — powered by Elasticsearch",
-    version="0.1.0",
+    version="0.2.0",
     root_path="/api",
     redirect_slashes=False,
     docs_url=None if settings.protected_memory_reads else "/docs",
@@ -273,15 +302,87 @@ app = FastAPI(
 )
 
 
+class RequestBodyLimitMiddleware:
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max(1024, int(max_bytes))
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_bytes:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"detail": "Request body too large"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header"},
+                )
+                await response(scope, receive, send)
+                return
+
+        if scope.get("method") in {"GET", "HEAD", "OPTIONS"}:
+            await self.app(scope, receive, send)
+            return
+
+        buffered_messages = []
+        received = 0
+        while True:
+            message = await receive()
+            buffered_messages.append(message)
+            if message.get("type") != "http.request":
+                break
+            received += len(message.get("body", b""))
+            if received > self.max_bytes:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"detail": "Request body too large"},
+                )
+                await response(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        message_index = 0
+
+        async def replay_receive():
+            nonlocal message_index
+            if message_index < len(buffered_messages):
+                message = buffered_messages[message_index]
+                message_index += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.frontend_url.rstrip("/")],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-AgentOverflow-Attempt",
+    ],
+    max_age=600,
+)
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+
+
 @app.middleware("http")
 async def api_security_headers(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > 65536:
-                return JSONResponse(status_code=413, content={"detail": "Request body too large"})
-        except ValueError:
-            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
     response = await call_next(request)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
@@ -289,6 +390,8 @@ async def api_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if settings.vercel_env.lower().strip() == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -307,16 +410,7 @@ app.include_router(memory.router)
 
 @app.get("/")
 async def root():
-    return {
-        "message": "Welcome to AgentOverflow API",
-        "docs": "/docs",
-        "backend": settings.storage_backend.lower().strip()
-        if settings.storage_backend
-        else ("local-demo" if settings.use_local_backend else "elasticsearch"),
-        "sandbox_engine": settings.sandbox_engine,
-        "modal_enabled": settings.modal_enabled,
-        "devin_enabled": bool(settings.devin_api_key and settings.devin_org_id),
-    }
+    return {"message": "AgentOverflow API", "status": "ok", "version": "0.2.0"}
 
 
 @app.get("/stats")

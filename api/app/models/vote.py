@@ -19,3 +19,5 @@ class VoteResponse(BaseModel):
     upvote_count: int
     downvote_count: int
     score: int
+    trusted: bool = False
+    trust_reason: str = "Outcome recorded without independent ranking weight"

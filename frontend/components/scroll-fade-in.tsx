@@ -23,30 +23,41 @@ export function ScrollFadeIn({
 }: ScrollFadeInProps) {
   const ref = useRef<HTMLDivElement>(null)
   const [isVisible, setVisible] = useState(false)
+  const [motionDisabled, setMotionDisabled] = useState(false)
 
   useEffect(() => {
     const el = ref.current
     if (!el) return
 
-    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
+    if (reducedMotion.matches || !("IntersectionObserver" in window)) {
+      setMotionDisabled(reducedMotion.matches)
+      setVisible(true)
+      return
+    }
 
     const observer = new IntersectionObserver(
       (entries) => {
         const [entry] = entries
         if (!entry.isIntersecting) return
-        if (delay > 0) {
-          timeoutId = setTimeout(() => setVisible(true), delay)
-        } else {
-          setVisible(true)
-        }
+        setVisible(true)
+        observer.disconnect()
       },
-      { threshold, rootMargin: "0px 0px -40px 0px" }
+      {
+        threshold: Math.min(threshold, 0.05),
+        rootMargin: "0px 0px -40px 0px",
+      }
     )
 
     observer.observe(el)
+    const fallbackId = window.setTimeout(
+      () => setVisible(true),
+      Math.max(2500, delay + 1000)
+    )
+
     return () => {
       observer.disconnect()
-      if (timeoutId) clearTimeout(timeoutId)
+      window.clearTimeout(fallbackId)
     }
   }, [threshold, delay])
 
@@ -61,7 +72,9 @@ export function ScrollFadeIn({
           : slideUp
             ? "translateY(24px)"
             : "none",
-        transition: `opacity 0.65s cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms, transform 0.65s cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms`,
+        transition: motionDisabled
+          ? "none"
+          : `opacity 0.65s cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms, transform 0.65s cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms`,
       }}
     >
       {children}

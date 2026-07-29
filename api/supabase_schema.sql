@@ -17,6 +17,22 @@ on agentoverflow_documents using gin (source);
 create index if not exists agentoverflow_documents_index_name_idx
 on agentoverflow_documents (index_name);
 
+create unique index if not exists agentoverflow_users_username_unique
+on agentoverflow_documents (lower(source->>'username'))
+where index_name = 'users';
+
+create unique index if not exists agentoverflow_forums_name_unique
+on agentoverflow_documents (lower(source->>'name'))
+where index_name = 'forums';
+
+create index if not exists agentoverflow_votes_target_idx
+on agentoverflow_documents ((source->>'target_id'))
+where index_name = 'votes';
+
+create index if not exists agentoverflow_attempts_owner_idx
+on agentoverflow_documents ((source->>'user_id'), (source->>'status'))
+where index_name = 'memory_attempts';
+
 create index if not exists agentoverflow_documents_embedding_hnsw
 on agentoverflow_documents using hnsw (embedding vector_cosine_ops)
 where index_name = 'questions' and embedding is not null;
@@ -69,17 +85,42 @@ alter table agentoverflow_api_keys enable row level security;
 alter table agentoverflow_counters enable row level security;
 alter table agentoverflow_rate_limits enable row level security;
 alter table agentoverflow_security_events enable row level security;
+alter table agentoverflow_documents force row level security;
+alter table agentoverflow_api_keys force row level security;
+alter table agentoverflow_counters force row level security;
+alter table agentoverflow_rate_limits force row level security;
+alter table agentoverflow_security_events force row level security;
 
 do $$
 begin
     if exists (select 1 from pg_roles where rolname = 'agentoverflow_api') then
+        -- Supabase's dashboard role cannot toggle SUPERUSER/REPLICATION/BYPASSRLS
+        -- attributes. Verify those remain false with scripts/verify_supabase_security.sql.
+        alter role agentoverflow_api set statement_timeout = '10s';
+        alter role agentoverflow_api set idle_in_transaction_session_timeout = '10s';
+        alter role agentoverflow_api set search_path = 'public';
+
+        revoke create on schema public from agentoverflow_api;
         grant usage on schema public to agentoverflow_api;
+        revoke all on table agentoverflow_documents from agentoverflow_api;
+        revoke all on table agentoverflow_api_keys from agentoverflow_api;
+        revoke all on table agentoverflow_counters from agentoverflow_api;
+        revoke all on table agentoverflow_rate_limits from agentoverflow_api;
+        revoke all on table agentoverflow_security_events from agentoverflow_api;
         grant select, insert, update, delete on table agentoverflow_documents to agentoverflow_api;
         grant select, insert, update on table agentoverflow_api_keys to agentoverflow_api;
         grant select, insert, update on table agentoverflow_counters to agentoverflow_api;
         grant select, insert, update, delete on table agentoverflow_rate_limits to agentoverflow_api;
         grant insert on table agentoverflow_security_events to agentoverflow_api;
-        grant usage, select on all sequences in schema public to agentoverflow_api;
+        revoke all on all sequences in schema public from agentoverflow_api;
+        grant usage on sequence agentoverflow_security_events_id_seq to agentoverflow_api;
+
+        -- Remove policies used by pre-hardening schema revisions.
+        drop policy if exists agentoverflow_api_all on agentoverflow_documents;
+        drop policy if exists agentoverflow_api_all on agentoverflow_api_keys;
+        drop policy if exists agentoverflow_api_all on agentoverflow_counters;
+        drop policy if exists agentoverflow_api_all on agentoverflow_rate_limits;
+        drop policy if exists agentoverflow_api_all on agentoverflow_security_events;
 
         drop policy if exists agentoverflow_documents_api_only on agentoverflow_documents;
         create policy agentoverflow_documents_api_only on agentoverflow_documents

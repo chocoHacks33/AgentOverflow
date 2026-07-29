@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 import path from "node:path";
 
 const pluginRoot = path.resolve(
@@ -12,12 +15,35 @@ const apiUrl =
   process.env.AGENTOVERFLOW_TEST_API_URL || "http://127.0.0.1:8000";
 const webUrl =
   process.env.AGENTOVERFLOW_TEST_WEB_URL || "http://127.0.0.1:3000";
+const inviteSecret =
+  process.env.AGENTOVERFLOW_TEST_INVITE_SECRET?.trim() || "";
+
+function issueEnrollmentToken() {
+  if (!inviteSecret) {
+    return "";
+  }
+  const inviteId = randomBytes(18).toString("base64url");
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  const payload = `invite:v1:${inviteId}:${expiresAt}`;
+  const signature = createHmac("sha256", inviteSecret)
+    .update(payload)
+    .digest("base64url");
+  return `${Buffer.from(payload).toString("base64url")}.${signature}`;
+}
 
 class McpClient {
-  constructor() {
+  constructor({
+    credentialFile,
+    cleanupCredentials = true,
+    autoRegister = true,
+  } = {}) {
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = "";
+    this.credentialFile =
+      credentialFile ||
+      path.join(os.tmpdir(), `agentoverflow-e2e-${randomUUID()}.json`);
+    this.cleanupCredentials = cleanupCredentials;
     this.child = spawn(process.execPath, [serverPath], {
       cwd: pluginRoot,
       env: {
@@ -25,6 +51,9 @@ class McpClient {
         AGENTOVERFLOW_API_URL: apiUrl,
         AGENTOVERFLOW_WEB_URL: webUrl,
         AGENTOVERFLOW_API_KEY: "",
+        AGENTOVERFLOW_CREDENTIALS_FILE: this.credentialFile,
+        AGENTOVERFLOW_AUTO_REGISTER: autoRegister ? "true" : "false",
+        AGENTOVERFLOW_ENROLLMENT_TOKEN: issueEnrollmentToken(),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -98,6 +127,9 @@ class McpClient {
 
   close() {
     this.child.stdin.end();
+    if (this.cleanupCredentials) {
+      rmSync(this.credentialFile, { force: true });
+    }
   }
 }
 
@@ -131,6 +163,7 @@ async function runSuccessfulPublisher(unique) {
     subtask.recommended_execution === null,
     "First agent should not find an execution stack."
   );
+  await new Promise((resolve) => setTimeout(resolve, 2100));
   const completed = await client.call("complete_subtask", {
     subtask_id: subtask.subtask_id,
     outcome: "success",
@@ -171,6 +204,7 @@ async function runSuccessfulConsumer(unique, expectedAnswerId) {
     subtask.recommended_execution?.answer_id === expectedAnswerId,
     "Second agent did not retrieve the first agent's execution stack."
   );
+  await new Promise((resolve) => setTimeout(resolve, 2100));
   const completed = await client.call("complete_subtask", {
     subtask_id: subtask.subtask_id,
     outcome: "success",
@@ -227,11 +261,45 @@ async function runFailedConsumer(unique, expectedAnswerId) {
   return { completed, summary };
 }
 
+async function verifyCredentialPersistence(unique) {
+  const credentialFile = path.join(
+    os.tmpdir(),
+    `agentoverflow-persistence-${randomUUID()}.json`
+  );
+  const first = new McpClient({ credentialFile, cleanupCredentials: false });
+  await first.initialize();
+  const firstTask = await first.call("begin_task", {
+    accept_contribution_terms: true,
+    task: `Validate persistent identity for ${unique}`,
+    context: "Node MCP credential persistence security test",
+  });
+  first.close();
+
+  const second = new McpClient({
+    credentialFile,
+    cleanupCredentials: true,
+    autoRegister: false,
+  });
+  await second.initialize();
+  const secondTask = await second.call("begin_task", {
+    accept_contribution_terms: true,
+    task: `Retest persistent identity for ${unique}`,
+    context: "Node MCP credential persistence security test",
+  });
+  second.close();
+  check(
+    firstTask.agent.id === secondTask.agent.id,
+    "Plugin restart created a new identity instead of reusing protected credentials."
+  );
+  return true;
+}
+
 const unique = `aoe2e${Date.now().toString(36)}`;
 const publisher = await runSuccessfulPublisher(unique);
 const answerId = publisher.completed.post.answer_id;
-const consumer = await runSuccessfulConsumer(unique, answerId);
 const failed = await runFailedConsumer(unique, answerId);
+const consumer = await runSuccessfulConsumer(unique, answerId);
+const credentialPersistence = await verifyCredentialPersistence(unique);
 
 process.stdout.write(
   `${JSON.stringify(
@@ -244,6 +312,7 @@ process.stdout.write(
       successful_use_vote: consumer.completed.vote,
       failed_use_vote: failed.completed.vote,
       failed_reasoning_published: failed.completed.published,
+      credential_persistence: credentialPersistence,
       publisher_summary: publisher.summary.counts,
       consumer_summary: consumer.summary.counts,
       failure_summary: failed.summary.counts,

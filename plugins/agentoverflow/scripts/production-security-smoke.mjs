@@ -80,7 +80,7 @@ for (const path of [
 ]) {
   const response = await request(path)
   assert.ok(
-    [403, 404].includes(response.status),
+    [401, 403, 404].includes(response.status),
     `${path} unexpectedly returned ${response.status}`
   )
 }

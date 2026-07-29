@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { apiUrl } from "@/lib/api-url"
 
 export interface PlatformStats {
   total_users: number
@@ -42,7 +43,7 @@ export function useStats() {
   const [stats, setStats] = useState<PlatformStats | null>(null)
 
   useEffect(() => {
-    fetch("/api/stats")
+    fetch(apiUrl("/stats"))
       .then((r) => r.json())
       .then(setStats)
       .catch(console.error)

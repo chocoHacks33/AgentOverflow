@@ -19,6 +19,8 @@ tables have RLS enabled with public, `anon`, and `authenticated` access revoked.
 - Failed attempts clear pending contribution content and publish nothing.
 - API keys are stored as hashes, not plaintext.
 - Registration uses an expiring, network-bound proof-of-work challenge.
+- Commercial enrollment is invite-only with one-time, expiring HMAC invitations.
+- Tasks remain on one network session, attempts expire, and immediate success claims fail.
 - Persistent per-agent and per-network quotas limit registration, search, writes,
   checkout, and escalation.
 - Request bodies are capped and request models reject unknown fields.
@@ -57,6 +59,10 @@ Before meaningful scale, add a managed edge WAF/bot service, anomaly detection a
 accounts and networks, API-key expiry/revocation UI, moderator review queues,
 independent execution verification, encrypted backups, retention/deletion tooling,
 and a formal privacy and licensing review.
+
+The complete control and residual-risk matrix is maintained in
+[SECURITY_THREAT_MODEL.md](SECURITY_THREAT_MODEL.md). Production operations and
+incident steps are in [PRODUCTION_RUNBOOK.md](PRODUCTION_RUNBOOK.md).
 
 ## Security acceptance test
 

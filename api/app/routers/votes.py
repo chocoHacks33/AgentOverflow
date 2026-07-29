@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.database import get_es
 from app.models.vote import VoteRequest, VoteResponse, VoteType
 from app.utils.auth import get_current_user
 from app.utils.memory_access import memory_reads_protected, verify_question_access_token
+from app.utils.request_security import actor_key, client_network_key
 
 router = APIRouter(tags=["votes"])
 
@@ -18,6 +19,8 @@ async def _cast_vote(
     user: dict,
     access_token: str | None = None,
     trusted_outcome: bool = False,
+    request_network_hash: str | None = None,
+    source_attempt_id: str | None = None,
 ) -> VoteResponse:
     """
     Shared voting logic for questions and answers.
@@ -61,6 +64,66 @@ async def _cast_vote(
 
     vote_doc_id = f"vote_{user['id']}_{target_id}"
     new_vote = vote_req.vote
+
+    protected = memory_reads_protected()
+    reviewer_registration_network = user.get("registration_network_hash")
+    publisher_network = target_src.get("publisher_network_hash")
+    trust_reason = "Outcome recorded without independent ranking weight"
+    ranking_eligible = not protected
+    if protected and trusted_outcome:
+        if target_type != "answer":
+            trust_reason = "Only execution outcomes can affect protected ranking"
+        elif target_src.get("schema_version") != "agentoverflow.execution.v3":
+            trust_reason = "Legacy execution records cannot receive trusted ranking weight"
+        elif target_src.get("provenance") != "agent_subtask_outcome":
+            trust_reason = "Execution provenance is not eligible for trusted ranking"
+        elif not source_attempt_id:
+            trust_reason = "A bound subtask attempt is required for trusted ranking"
+        elif not reviewer_registration_network or not request_network_hash or not publisher_network:
+            trust_reason = "Independent identity provenance is incomplete"
+        elif reviewer_registration_network == publisher_network:
+            trust_reason = "Reviewer and publisher enrolled from the same independence cluster"
+        elif request_network_hash == publisher_network:
+            trust_reason = "Outcome was reported from the publisher's independence cluster"
+        else:
+            ranking_eligible = True
+            trust_reason = "Independent task-bound outcome"
+
+    cluster_key = reviewer_registration_network or user["id"]
+    cluster_id = actor_key("outcome-cluster", target_id, cluster_key)
+    if hasattr(es, "cast_vote_atomic"):
+        result = await es.cast_vote_atomic(
+            target_index=target_index,
+            target_id=target_id,
+            target_type=target_type,
+            user_id=user["id"],
+            vote_value=new_vote.value,
+            vote_doc_id=vote_doc_id,
+            ranking_eligible=ranking_eligible,
+            trust_reason=trust_reason,
+            cluster_id=cluster_id,
+            vote_metadata={
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source_attempt_id": source_attempt_id,
+                "reviewer_network_hash": request_network_hash,
+                "reviewer_registration_network_hash": reviewer_registration_network,
+                "provenance": "observed_subtask_outcome" if trusted_outcome else "direct_vote",
+            },
+        )
+        if result["status"] == "target_missing":
+            raise HTTPException(status_code=404, detail=f"{target_type.title()} not found")
+        if result["status"] == "no_vote":
+            raise HTTPException(status_code=400, detail="No vote to remove")
+        if result["status"] == "already_same":
+            raise HTTPException(status_code=409, detail=f"Already voted {new_vote.value}")
+        return VoteResponse(
+            vote=result["vote"],
+            upvote_count=result["upvote_count"],
+            downvote_count=result["downvote_count"],
+            score=result["score"],
+            trusted=result["trusted"],
+            trust_reason=result["trust_reason"],
+        )
 
     # Check for existing vote
     existing_vote = None
@@ -151,6 +214,8 @@ async def _cast_vote(
         upvote_count=src["upvote_count"],
         downvote_count=src["downvote_count"],
         score=src["score"],
+        trusted=ranking_eligible,
+        trust_reason=trust_reason,
     )
 
 
@@ -163,6 +228,7 @@ async def _cast_vote(
 async def vote_on_question(
     question_id: str,
     body: VoteRequest,
+    request: Request,
     access_token: str | None = Query(None),
     user: dict = Depends(get_current_user),
 ):
@@ -176,6 +242,7 @@ async def vote_on_question(
         vote_req=body,
         user=user,
         access_token=access_token,
+        request_network_hash=client_network_key(request),
     )
 
 
@@ -188,6 +255,7 @@ async def vote_on_question(
 async def vote_on_answer(
     answer_id: str,
     body: VoteRequest,
+    request: Request,
     access_token: str | None = Query(None),
     user: dict = Depends(get_current_user),
 ):
@@ -201,4 +269,5 @@ async def vote_on_answer(
         vote_req=body,
         user=user,
         access_token=access_token,
+        request_network_hash=client_network_key(request),
     )

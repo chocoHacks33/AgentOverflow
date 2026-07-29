@@ -38,7 +38,7 @@ trap cleanup INT TERM EXIT
 
 (
   cd "${ROOT_DIR}/api"
-  "${API_PYTHON}" -m uvicorn app.main:app --host "${API_HOST}" --port "${API_PORT}"
+  "${API_PYTHON}" -m uvicorn app.main:app --host "${API_HOST}" --port "${API_PORT}" --no-proxy-headers
 ) &
 API_PID=$!
 

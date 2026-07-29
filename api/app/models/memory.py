@@ -40,9 +40,16 @@ class MemoryExecutionStack(BaseModel):
     answer_id: str
     question_id: str
     execution_stack: str
+    rationale_summary: str
+    execution_steps: list[str]
+    result: str
+    validation: str
     review_score: int
     upvotes: int
     downvotes: int
+    trust_tier: Literal["unconfirmed", "observed", "reviewed", "verified"]
+    independent_successes: int
+    independent_failures: int
     verified: bool
     verification_status: str
     relevance_score: float
@@ -65,16 +72,18 @@ class MemorySubtaskCompleteRequest(BaseModel):
 
     outcome: Literal["success", "failure"]
     used_answer_id: str | None = Field(None, max_length=160)
-    rationale_summary: str = Field("", max_length=1200)
-    execution_steps: list[str] = Field(default_factory=list, max_length=16)
-    result: str = Field("", max_length=1500)
-    validation: str = Field("", max_length=1800)
+    rationale_summary: str = Field("", max_length=800)
+    execution_steps: list[str] = Field(default_factory=list, max_length=12)
+    result: str = Field("", max_length=1000)
+    validation: str = Field("", max_length=1200)
 
 
 class MemorySubtaskCompleteResponse(BaseModel):
     attempt_id: str
     status: Literal["succeeded", "failed"]
     vote: str | None = None
+    vote_trusted: bool | None = None
+    vote_trust_reason: str | None = None
     published: bool
     question_id: str | None
     answer_id: str | None = None

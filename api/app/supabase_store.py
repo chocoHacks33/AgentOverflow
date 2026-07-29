@@ -136,6 +136,7 @@ class SupabasePostgres:
         self.ingest = _SupabaseIngest()
         self.security = _SupabaseSecurity(self)
         self._embedding_backfill_checked = False
+        self._runtime_role_checked = False
 
     async def ensure_pool(self) -> Any:
         if asyncpg is None:
@@ -150,6 +151,45 @@ class SupabasePostgres:
                 command_timeout=30,
                 statement_cache_size=0,
             )
+        if (
+            not self._runtime_role_checked
+            and settings.protected_memory_reads
+            and settings.vercel_env.strip().lower() == "production"
+        ):
+            async with self.pool.acquire() as conn:
+                role = await conn.fetchrow(
+                    """
+                    select
+                        current_user as role_name,
+                        r.rolsuper,
+                        r.rolbypassrls,
+                        r.rolcreaterole,
+                        r.rolcreatedb,
+                        has_schema_privilege(current_user, 'public', 'CREATE')
+                            as can_create_public_schema
+                    from pg_roles r
+                    where r.rolname = current_user
+                    """
+                )
+            expected_role = settings.supabase_expected_role.strip()
+            if not role or not expected_role or role["role_name"] != expected_role:
+                raise RuntimeError(
+                    "Protected production must use the expected limited database role"
+                )
+            if any(
+                bool(role[field])
+                for field in (
+                    "rolsuper",
+                    "rolbypassrls",
+                    "rolcreaterole",
+                    "rolcreatedb",
+                    "can_create_public_schema",
+                )
+            ):
+                raise RuntimeError(
+                    "Protected production database role has unsafe privileges"
+                )
+            self._runtime_role_checked = True
         return self.pool
 
     async def ensure_schema(self) -> None:
@@ -190,6 +230,34 @@ class SupabasePostgres:
                 """
                 create index if not exists agentoverflow_documents_index_name_idx
                 on agentoverflow_documents (index_name)
+                """
+            )
+            await conn.execute(
+                """
+                create unique index if not exists agentoverflow_users_username_unique
+                on agentoverflow_documents (lower(source->>'username'))
+                where index_name = 'users'
+                """
+            )
+            await conn.execute(
+                """
+                create unique index if not exists agentoverflow_forums_name_unique
+                on agentoverflow_documents (lower(source->>'name'))
+                where index_name = 'forums'
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists agentoverflow_votes_target_idx
+                on agentoverflow_documents ((source->>'target_id'))
+                where index_name = 'votes'
+                """
+            )
+            await conn.execute(
+                """
+                create index if not exists agentoverflow_attempts_owner_idx
+                on agentoverflow_documents ((source->>'user_id'), (source->>'status'))
+                where index_name = 'memory_attempts'
                 """
             )
             try:
@@ -264,6 +332,7 @@ class SupabasePostgres:
             await self.pool.close()
             self.pool = None
             self._schema_ready = False
+            self._runtime_role_checked = False
 
     async def info(self) -> dict[str, Any]:
         await self.ensure_schema()
@@ -513,6 +582,167 @@ class SupabasePostgres:
             user_id,
         )
         return not result.endswith(" 0")
+
+    async def cast_vote_atomic(
+        self,
+        *,
+        target_index: str,
+        target_id: str,
+        target_type: str,
+        user_id: str,
+        vote_value: str,
+        vote_doc_id: str,
+        ranking_eligible: bool,
+        trust_reason: str,
+        cluster_id: str | None,
+        vote_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        await self.ensure_schema()
+        pool = await self.ensure_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                target_row = await conn.fetchrow(
+                    """
+                    select source
+                    from agentoverflow_documents
+                    where index_name = $1 and doc_id = $2
+                    for update
+                    """,
+                    target_index,
+                    target_id,
+                )
+                if not target_row:
+                    return {"status": "target_missing"}
+                vote_row = await conn.fetchrow(
+                    """
+                    select source
+                    from agentoverflow_documents
+                    where index_name = 'votes' and doc_id = $1
+                    for update
+                    """,
+                    vote_doc_id,
+                )
+                existing = _decode_source(vote_row["source"]) if vote_row else None
+                existing_vote = existing.get("vote_type") if existing else None
+                existing_weight = int(existing.get("trusted_weight", 0)) if existing else 0
+                if vote_value == "none" and not existing:
+                    return {"status": "no_vote"}
+                if existing_vote == vote_value:
+                    return {"status": "already_same"}
+
+                trusted = False
+                effective_reason = trust_reason
+                weight = existing_weight
+                if not existing and vote_value != "none":
+                    if ranking_eligible and cluster_id:
+                        cluster_source = {
+                            "user_id": user_id,
+                            "target_id": target_id,
+                            "created_at": vote_metadata.get("created_at"),
+                        }
+                        claimed = await conn.fetchval(
+                            """
+                            insert into agentoverflow_documents (
+                                index_name, doc_id, source, embedding
+                            )
+                            values ('outcome_clusters', $1, $2::jsonb, null)
+                            on conflict (index_name, doc_id) do nothing
+                            returning doc_id
+                            """,
+                            cluster_id,
+                            json.dumps(cluster_source),
+                        )
+                        if claimed:
+                            weight = 1
+                            trusted = True
+                        else:
+                            effective_reason = (
+                                "Another identity from this independence cluster already reviewed the execution"
+                            )
+                    vote_source = {
+                        "target_id": target_id,
+                        "target_type": target_type,
+                        "user_id": user_id,
+                        "vote_type": vote_value,
+                        "trusted_weight": weight,
+                        "trust_reason": effective_reason,
+                        **vote_metadata,
+                    }
+                    await conn.execute(
+                        """
+                        insert into agentoverflow_documents (
+                            index_name, doc_id, source, embedding
+                        )
+                        values ('votes', $1, $2::jsonb, null)
+                        """,
+                        vote_doc_id,
+                        json.dumps(vote_source),
+                    )
+                elif vote_value == "none":
+                    await conn.execute(
+                        """
+                        delete from agentoverflow_documents
+                        where index_name = 'votes' and doc_id = $1
+                        """,
+                        vote_doc_id,
+                    )
+                    trusted = bool(existing_weight)
+                    effective_reason = existing.get("trust_reason", effective_reason)
+                else:
+                    existing["vote_type"] = vote_value
+                    existing["updated_at"] = vote_metadata.get("created_at")
+                    await conn.execute(
+                        """
+                        update agentoverflow_documents
+                        set source = $2::jsonb, updated_at = now()
+                        where index_name = 'votes' and doc_id = $1
+                        """,
+                        vote_doc_id,
+                        json.dumps(existing),
+                    )
+                    trusted = bool(existing_weight)
+                    effective_reason = existing.get("trust_reason", effective_reason)
+
+                up_delta = 0
+                down_delta = 0
+                if existing_vote == "up":
+                    up_delta -= existing_weight
+                elif existing_vote == "down":
+                    down_delta -= existing_weight
+                if vote_value == "up":
+                    up_delta += weight
+                elif vote_value == "down":
+                    down_delta += weight
+
+                target = _decode_source(target_row["source"])
+                target["upvote_count"] = max(
+                    0,
+                    int(target.get("upvote_count", 0)) + up_delta,
+                )
+                target["downvote_count"] = max(
+                    0,
+                    int(target.get("downvote_count", 0)) + down_delta,
+                )
+                target["score"] = target["upvote_count"] - target["downvote_count"]
+                await conn.execute(
+                    """
+                    update agentoverflow_documents
+                    set source = $3::jsonb, updated_at = now()
+                    where index_name = $1 and doc_id = $2
+                    """,
+                    target_index,
+                    target_id,
+                    json.dumps(target),
+                )
+                return {
+                    "status": "recorded",
+                    "vote": vote_value,
+                    "upvote_count": target["upvote_count"],
+                    "downvote_count": target["downvote_count"],
+                    "score": target["score"],
+                    "trusted": trusted,
+                    "trust_reason": effective_reason,
+                }
 
     async def consume_task_subtask(self, task_id: str, user_id: str, limit: int) -> bool:
         await self.ensure_schema()

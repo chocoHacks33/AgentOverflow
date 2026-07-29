@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import secrets
 from copy import deepcopy
@@ -91,6 +92,7 @@ class LocalElasticsearch:
         self.api_keys_by_encoded: dict[str, dict[str, Any]] = {}
         self.counters: dict[str, int] = {}
         self.rate_limits: dict[tuple[str, str, int], int] = {}
+        self._vote_lock = asyncio.Lock()
         self.security_events: list[dict[str, Any]] = []
         self.indices = _LocalIndices(self)
         self.ingest = _LocalIngest()
@@ -179,6 +181,93 @@ class LocalElasticsearch:
             return False
         attempt["status"] = "completing"
         return True
+
+    async def cast_vote_atomic(
+        self,
+        *,
+        target_index: str,
+        target_id: str,
+        target_type: str,
+        user_id: str,
+        vote_value: str,
+        vote_doc_id: str,
+        ranking_eligible: bool,
+        trust_reason: str,
+        cluster_id: str | None,
+        vote_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with self._vote_lock:
+            target = self.data.get(target_index, {}).get(target_id)
+            if not target:
+                return {"status": "target_missing"}
+            votes = self.data.setdefault("votes", {})
+            existing = votes.get(vote_doc_id)
+            existing_vote = existing.get("vote_type") if existing else None
+            existing_weight = int(existing.get("trusted_weight", 0)) if existing else 0
+            if vote_value == "none" and not existing:
+                return {"status": "no_vote"}
+            if existing_vote == vote_value:
+                return {"status": "already_same"}
+
+            trusted = False
+            effective_reason = trust_reason
+            weight = existing_weight
+            if not existing and vote_value != "none":
+                if ranking_eligible and cluster_id:
+                    clusters = self.data.setdefault("outcome_clusters", {})
+                    cluster = clusters.get(cluster_id)
+                    if cluster and cluster.get("user_id") != user_id:
+                        effective_reason = "Another identity from this independence cluster already reviewed the execution"
+                    else:
+                        clusters[cluster_id] = {
+                            "user_id": user_id,
+                            "target_id": target_id,
+                            "created_at": vote_metadata.get("created_at"),
+                        }
+                        weight = 1
+                        trusted = True
+                votes[vote_doc_id] = {
+                    "target_id": target_id,
+                    "target_type": target_type,
+                    "user_id": user_id,
+                    "vote_type": vote_value,
+                    "trusted_weight": weight,
+                    "trust_reason": effective_reason,
+                    **vote_metadata,
+                }
+            elif vote_value == "none":
+                votes.pop(vote_doc_id, None)
+                trusted = bool(existing_weight)
+                effective_reason = existing.get("trust_reason", effective_reason)
+            else:
+                existing["vote_type"] = vote_value
+                existing["updated_at"] = vote_metadata.get("created_at")
+                trusted = bool(existing_weight)
+                effective_reason = existing.get("trust_reason", effective_reason)
+
+            up_delta = 0
+            down_delta = 0
+            if existing_vote == "up":
+                up_delta -= existing_weight
+            elif existing_vote == "down":
+                down_delta -= existing_weight
+            if vote_value == "up":
+                up_delta += weight
+            elif vote_value == "down":
+                down_delta += weight
+
+            target["upvote_count"] = max(0, int(target.get("upvote_count", 0)) + up_delta)
+            target["downvote_count"] = max(0, int(target.get("downvote_count", 0)) + down_delta)
+            target["score"] = target["upvote_count"] - target["downvote_count"]
+            return {
+                "status": "recorded",
+                "vote": vote_value,
+                "upvote_count": target["upvote_count"],
+                "downvote_count": target["downvote_count"],
+                "score": target["score"],
+                "trusted": trusted,
+                "trust_reason": effective_reason,
+            }
 
     async def consume_task_subtask(self, task_id: str, user_id: str, limit: int) -> bool:
         task = self.data.get("memory_tasks", {}).get(task_id)

@@ -14,12 +14,20 @@ class UserRegisterRequest(BaseModel):
     )
     challenge_token: str | None = Field(None, min_length=40, max_length=1200)
     challenge_proof: str | None = Field(None, min_length=1, max_length=80)
+    enrollment_token: str | None = Field(None, min_length=40, max_length=1200)
+
+
+class RegistrationChallengeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enrollment_token: str | None = Field(None, min_length=40, max_length=1200)
 
 
 class RegistrationChallengeResponse(BaseModel):
     challenge_token: str
     difficulty_bits: int
     expires_in_seconds: int
+    registration_mode: str
 
 
 class UserPublic(BaseModel):
