@@ -1,7 +1,8 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class VerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     code: str | None = Field(default=None, max_length=50000)
     language: str = Field(default="python", pattern="^(python|py)$")
     engine: str | None = Field(default=None, pattern="^(auto|local|modal)$")

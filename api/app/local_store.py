@@ -90,6 +90,8 @@ class LocalElasticsearch:
         self.api_keys: dict[str, dict[str, Any]] = {}
         self.api_keys_by_encoded: dict[str, dict[str, Any]] = {}
         self.counters: dict[str, int] = {}
+        self.rate_limits: dict[tuple[str, str, int], int] = {}
+        self.security_events: list[dict[str, Any]] = []
         self.indices = _LocalIndices(self)
         self.ingest = _LocalIngest()
         self.security = _LocalSecurity(self)
@@ -108,6 +110,110 @@ class LocalElasticsearch:
 
     async def info(self) -> dict[str, Any]:
         return {"version": {"number": "local-demo"}}
+
+    async def consume_rate_limit(
+        self,
+        bucket: str,
+        key_hash: str,
+        limit: int,
+        window_seconds: int,
+    ) -> tuple[bool, int, int]:
+        now_seconds = int(datetime.now(timezone.utc).timestamp())
+        window_start = now_seconds - (now_seconds % window_seconds)
+        key = (bucket, key_hash, window_start)
+        count = self.rate_limits.get(key, 0) + 1
+        self.rate_limits[key] = count
+        retry_after = max(1, window_start + window_seconds - now_seconds)
+        return count <= limit, max(0, limit - count), retry_after
+
+    async def record_security_event(
+        self,
+        event_type: str,
+        actor_hash: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.security_events.append(
+            {
+                "event_type": event_type,
+                "actor_hash": actor_hash,
+                "detail": deepcopy(detail or {}),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    async def hybrid_memory_search(
+        self,
+        query_text: str,
+        *,
+        forum_id: str | None = None,
+        size: int = 8,
+    ) -> list[dict[str, Any]]:
+        from app.utils.retrieval import relevance_score
+
+        hits: list[dict[str, Any]] = []
+        for doc_id, source in self.data.get("questions", {}).items():
+            if forum_id and str(source.get("forum_id")) != str(forum_id):
+                continue
+            score = relevance_score(
+                query_text,
+                str(source.get("title", "")),
+                str(source.get("body", "")),
+            )
+            if score <= 0:
+                continue
+            hits.append(_doc_hit(doc_id, source, score))
+        hits.sort(
+            key=lambda hit: (
+                float(hit.get("_score", 0)),
+                int(hit["_source"].get("score", 0)),
+            ),
+            reverse=True,
+        )
+        return hits[:size]
+
+    async def claim_memory_attempt(self, attempt_id: str, user_id: str) -> bool:
+        attempt = self.data.get("memory_attempts", {}).get(attempt_id)
+        if not attempt:
+            return False
+        if attempt.get("user_id") != user_id or attempt.get("status") != "in_progress":
+            return False
+        attempt["status"] = "completing"
+        return True
+
+    async def consume_task_subtask(self, task_id: str, user_id: str, limit: int) -> bool:
+        task = self.data.get("memory_tasks", {}).get(task_id)
+        if not task or task.get("user_id") != user_id:
+            return False
+        count = int(task.get("subtask_count", 0))
+        if count >= limit:
+            return False
+        task["subtask_count"] = count + 1
+        return True
+
+    async def platform_stats(self) -> dict[str, int]:
+        question_upvotes = sum(
+            int(source.get("upvote_count", 0))
+            for source in self.data.get("questions", {}).values()
+        )
+        answer_upvotes = sum(
+            int(source.get("upvote_count", 0))
+            for source in self.data.get("answers", {}).values()
+        )
+        verified_answers = sum(
+            1
+            for source in self.data.get("answers", {}).values()
+            if source.get("verified") is True
+        )
+        return {
+            "total_users": len(self.data.get("users", {})),
+            "total_questions": len(self.data.get("questions", {})),
+            "total_answers": len(self.data.get("answers", {})),
+            "total_forums": len(self.data.get("forums", {})),
+            "verified_answers": verified_answers,
+            "question_upvotes": question_upvotes,
+            "answer_upvotes": answer_upvotes,
+            "total_upvotes": question_upvotes + answer_upvotes,
+        }
 
     async def count(self, index: str, query: dict[str, Any] | None = None, **_: Any) -> dict[str, int]:
         docs = self.data.get(index, {}).values()

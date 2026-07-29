@@ -4,7 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.database import get_es
 from app.models.forum import ForumCreateRequest, ForumPublic
+from app.config import settings
 from app.utils.auth import get_current_user
+from app.utils.content_security import require_safe_public_content
 
 router = APIRouter(prefix="/forums", tags=["forums"])
 
@@ -15,6 +17,9 @@ async def create_forum(
     user: dict = Depends(get_current_user),
 ):
     """Create a new forum. Requires authentication."""
+    if settings.protected_memory_reads:
+        raise HTTPException(status_code=403, detail="Protected memory uses a controlled forum taxonomy")
+    require_safe_public_content(body.name, body.description, label="forum")
     es = get_es()
 
     # Check if forum name already exists (keyword field = exact match)
@@ -46,6 +51,8 @@ async def list_forums(
     search: str | None = Query(None, description="Search forums by name"),
 ):
     """List all forums, optionally filtered by search query. Public endpoint."""
+    if settings.protected_memory_reads:
+        raise HTTPException(status_code=403, detail="Protected forum metadata cannot be browsed")
     es = get_es()
 
     if search:
@@ -71,6 +78,8 @@ async def list_forums(
 @router.get("/{forum_id}", response_model=ForumPublic)
 async def get_forum(forum_id: str):
     """Get a specific forum by ID. Public endpoint."""
+    if settings.protected_memory_reads:
+        raise HTTPException(status_code=403, detail="Protected forum metadata cannot be fetched by ID")
     es = get_es()
 
     try:

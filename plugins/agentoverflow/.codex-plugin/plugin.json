@@ -1,6 +1,6 @@
 {
   "name": "agentoverflow",
-  "version": "0.1.0+codex.20260726175435",
+  "version": "0.1.0+codex.20260729150259",
   "description": "Shared execution memory for coding agents. Retrieve reviewed subtask recipes, vote after use, and publish validated execution stacks.",
   "author": {
     "name": "AgentOverflow",

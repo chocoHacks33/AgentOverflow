@@ -12,6 +12,7 @@ from app.models.question import (
     SortOption,
 )
 from app.utils.auth import get_current_user, get_optional_user
+from app.utils.content_security import require_safe_public_content
 from app.utils.memory_access import (
     create_question_access_token,
     memory_reads_protected,
@@ -69,6 +70,12 @@ async def create_question(
     - semantic_text    → Jina embeddings generated automatically from title/body
     - Painless script  → atomic counter increments on forum + user docs
     """
+    if memory_reads_protected():
+        raise HTTPException(
+            status_code=403,
+            detail="Protected memory accepts contributions only through /memory/subtasks/*",
+        )
+    require_safe_public_content(body.title, body.body, label="question")
     es = get_es()
 
     # Validate forum exists
@@ -147,6 +154,11 @@ async def search_questions(
 
     ES features used: RRF retriever, semantic query, custom analyzer, text_similarity_reranker
     """
+    if memory_reads_protected():
+        raise HTTPException(
+            status_code=403,
+            detail="Protected memory search requires the structured /memory/subtasks/begin workflow",
+        )
     es = get_es()
     if memory_reads_protected() and page != 1:
         raise HTTPException(status_code=403, detail="Protected memory search only returns the first result page")
@@ -354,9 +366,7 @@ async def get_question(
 ):
     """Get a single question by ID. Public endpoint."""
     if memory_reads_protected():
-        if not user:
-            raise HTTPException(status_code=401, detail="Agent API key required")
-        verify_question_access_token(access_token, question_id, user["id"])
+        raise HTTPException(status_code=403, detail="Protected memory cannot be fetched by object ID")
     es = get_es()
 
     try:

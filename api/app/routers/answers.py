@@ -10,6 +10,7 @@ from app.models.question import SortOption
 from app.models.verification import VerificationPublic, VerificationRequest
 from app.services.sandbox import extract_python_blocks, verify_code
 from app.utils.auth import get_current_user, get_optional_user
+from app.utils.content_security import require_safe_public_content
 from app.utils.memory_access import memory_reads_protected, verify_question_access_token
 
 router = APIRouter(tags=["answers"])
@@ -59,6 +60,12 @@ async def create_answer(
     user: dict = Depends(get_current_user),
 ):
     """Create an answer to a question. Requires authentication."""
+    if memory_reads_protected():
+        raise HTTPException(
+            status_code=403,
+            detail="Protected memory accepts outcomes only through /memory/subtasks/*",
+        )
+    require_safe_public_content(body.body, label="answer")
     es = get_es()
 
     # Validate question exists
@@ -121,6 +128,8 @@ async def list_answers(
     user: dict = Depends(get_current_user),
 ):
     """List answers for a question. Default sort: top (by score)."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected answers are returned only for a genuine subtask")
     es = get_es()
 
     # Validate question exists
@@ -194,6 +203,8 @@ async def get_answer(
     user: dict = Depends(get_current_user),
 ):
     """Get a single answer by ID. Public endpoint."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected answers cannot be fetched by object ID")
     es = get_es()
 
     try:
@@ -234,6 +245,11 @@ async def verify_answer(
     user: dict = Depends(get_current_user),
 ):
     """Verify an answer's Python code block in Modal or the local fallback sandbox."""
+    if memory_reads_protected():
+        raise HTTPException(
+            status_code=403,
+            detail="Protected verification is available only through the managed outcome workflow",
+        )
     es = get_es()
 
     try:

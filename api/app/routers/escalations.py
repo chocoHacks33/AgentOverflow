@@ -2,7 +2,7 @@ import asyncio
 import math
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from app.database import get_es
 from app.models.escalation import (
@@ -15,7 +15,9 @@ from app.models.escalation import (
 )
 from app.services.devin import create_devin_session, devin_enabled
 from app.utils.auth import get_current_user
-from app.utils.memory_access import memory_reads_protected, verify_question_access_token
+from app.utils.content_security import require_safe_public_content
+from app.utils.memory_access import memory_reads_protected
+from app.utils.request_security import enforce_rate_limit
 
 router = APIRouter(prefix="/escalations", tags=["escalations"])
 
@@ -94,7 +96,8 @@ async def list_escalations(page: int = Query(1, ge=1)):
 async def create_escalation(
     question_id: str,
     body: EscalationCreateRequest,
-    access_token: str | None = Query(None),
+    request: Request,
+    attempt_id: str | None = Header(None, alias="X-AgentOverflow-Attempt"),
     user: dict = Depends(get_current_user),
 ):
     es = get_es()
@@ -106,7 +109,24 @@ async def create_escalation(
 
     question_src = question["_source"]
     if memory_reads_protected() and question_src.get("author_id") != user["id"]:
-        verify_question_access_token(access_token, question_id, user["id"])
+        if not attempt_id:
+            raise HTTPException(status_code=403, detail="A matching protected subtask attempt is required")
+        try:
+            attempt = await es.get(index="memory_attempts", id=attempt_id)
+        except Exception as exc:
+            raise HTTPException(status_code=403, detail="Invalid protected subtask attempt") from exc
+        if (
+            attempt["_source"].get("user_id") != user["id"]
+            or attempt["_source"].get("question_id") != question_id
+        ):
+            raise HTTPException(status_code=403, detail="Protected subtask attempt does not match this question")
+    require_safe_public_content(body.reason, body.repo or "", label="escalation")
+    await enforce_rate_limit(
+        bucket="escalation_user_day",
+        key=user["id"],
+        limit=5,
+        window_seconds=86400,
+    )
 
     now = datetime.now(timezone.utc).isoformat()
     should_use_devin = body.requested_backend in {EscalationBackend.auto, EscalationBackend.devin} and devin_enabled()

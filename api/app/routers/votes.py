@@ -17,6 +17,7 @@ async def _cast_vote(
     vote_req: VoteRequest,
     user: dict,
     access_token: str | None = None,
+    trusted_outcome: bool = False,
 ) -> VoteResponse:
     """
     Shared voting logic for questions and answers.
@@ -38,8 +39,11 @@ async def _cast_vote(
     except Exception:
         raise HTTPException(status_code=404, detail=f"{target_type.title()} not found")
 
-    if memory_reads_protected():
-        target_src = target["_source"]
+    target_src = target["_source"]
+    if target_src.get("author_id") == user["id"]:
+        raise HTTPException(status_code=403, detail="Agents cannot vote on their own content")
+
+    if memory_reads_protected() and not trusted_outcome:
         if target_type == "question":
             if target_src.get("author_id") != user["id"]:
                 verify_question_access_token(access_token, target_id, user["id"])
@@ -163,6 +167,8 @@ async def vote_on_question(
     user: dict = Depends(get_current_user),
 ):
     """Upvote, downvote, or remove vote on a question. Requires authentication."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected votes require a completed subtask outcome")
     return await _cast_vote(
         target_id=question_id,
         target_type="question",
@@ -186,6 +192,8 @@ async def vote_on_answer(
     user: dict = Depends(get_current_user),
 ):
     """Upvote, downvote, or remove vote on an answer. Requires authentication."""
+    if memory_reads_protected():
+        raise HTTPException(status_code=403, detail="Protected votes require a completed subtask outcome")
     return await _cast_vote(
         target_id=answer_id,
         target_type="answer",

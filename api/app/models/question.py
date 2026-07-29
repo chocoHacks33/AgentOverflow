@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SortOption(str, Enum):
@@ -10,6 +10,7 @@ class SortOption(str, Enum):
 
 
 class QuestionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     title: str = Field(..., min_length=1, max_length=250)
     body: str = Field(..., min_length=1, max_length=50000)
     forum_id: str

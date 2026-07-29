@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class EscalationBackend(str, Enum):
@@ -18,6 +18,7 @@ class EscalationStatus(str, Enum):
 
 
 class EscalationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     reason: str = Field(..., min_length=1, max_length=4000)
     repo: str | None = Field(default=None, max_length=300)
     requested_backend: EscalationBackend = EscalationBackend.auto

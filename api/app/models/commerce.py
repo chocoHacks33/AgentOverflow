@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PurchaseStatus(str, Enum):
@@ -17,13 +17,16 @@ class CheckoutProvider(str, Enum):
 
 
 class CheckoutRequest(BaseModel):
-    success_url: str | None = None
-    cancel_url: str | None = None
+    model_config = ConfigDict(extra="forbid")
+    success_url: str | None = Field(default=None, max_length=2000)
+    cancel_url: str | None = Field(default=None, max_length=2000)
     reason: str | None = Field(default=None, max_length=1000)
 
 
 class CheckoutConfirmRequest(BaseModel):
-    session_id: str
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(..., min_length=8, max_length=255)
 
 
 class ReasoningPack(BaseModel):

@@ -17,15 +17,89 @@ on agentoverflow_documents using gin (source);
 create index if not exists agentoverflow_documents_index_name_idx
 on agentoverflow_documents (index_name);
 
+create index if not exists agentoverflow_documents_embedding_hnsw
+on agentoverflow_documents using hnsw (embedding vector_cosine_ops)
+where index_name = 'questions' and embedding is not null;
+
 create table if not exists agentoverflow_api_keys (
     id text primary key,
     encoded_key_hash text not null unique,
     name text not null,
     metadata jsonb not null,
-    created_at timestamptz not null default now()
+    created_at timestamptz not null default now(),
+    expires_at timestamptz,
+    revoked_at timestamptz,
+    last_used_at timestamptz
 );
+
+alter table agentoverflow_api_keys
+    add column if not exists expires_at timestamptz,
+    add column if not exists revoked_at timestamptz,
+    add column if not exists last_used_at timestamptz;
 
 create table if not exists agentoverflow_counters (
     prefix text primary key,
     value bigint not null
 );
+
+create table if not exists agentoverflow_rate_limits (
+    bucket text not null,
+    key_hash text not null,
+    window_start timestamptz not null,
+    request_count integer not null default 0,
+    primary key (bucket, key_hash, window_start)
+);
+
+create table if not exists agentoverflow_security_events (
+    id bigint generated always as identity primary key,
+    event_type text not null,
+    actor_hash text not null,
+    detail jsonb not null default '{}'::jsonb,
+    created_at timestamptz not null default now()
+);
+
+revoke all on table agentoverflow_documents from public, anon, authenticated;
+revoke all on table agentoverflow_api_keys from public, anon, authenticated;
+revoke all on table agentoverflow_counters from public, anon, authenticated;
+revoke all on table agentoverflow_rate_limits from public, anon, authenticated;
+revoke all on table agentoverflow_security_events from public, anon, authenticated;
+
+alter table agentoverflow_documents enable row level security;
+alter table agentoverflow_api_keys enable row level security;
+alter table agentoverflow_counters enable row level security;
+alter table agentoverflow_rate_limits enable row level security;
+alter table agentoverflow_security_events enable row level security;
+
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'agentoverflow_api') then
+        grant usage on schema public to agentoverflow_api;
+        grant select, insert, update, delete on table agentoverflow_documents to agentoverflow_api;
+        grant select, insert, update on table agentoverflow_api_keys to agentoverflow_api;
+        grant select, insert, update on table agentoverflow_counters to agentoverflow_api;
+        grant select, insert, update, delete on table agentoverflow_rate_limits to agentoverflow_api;
+        grant insert on table agentoverflow_security_events to agentoverflow_api;
+        grant usage, select on all sequences in schema public to agentoverflow_api;
+
+        drop policy if exists agentoverflow_documents_api_only on agentoverflow_documents;
+        create policy agentoverflow_documents_api_only on agentoverflow_documents
+            for all to agentoverflow_api using (true) with check (true);
+
+        drop policy if exists agentoverflow_api_keys_api_only on agentoverflow_api_keys;
+        create policy agentoverflow_api_keys_api_only on agentoverflow_api_keys
+            for all to agentoverflow_api using (true) with check (true);
+
+        drop policy if exists agentoverflow_counters_api_only on agentoverflow_counters;
+        create policy agentoverflow_counters_api_only on agentoverflow_counters
+            for all to agentoverflow_api using (true) with check (true);
+
+        drop policy if exists agentoverflow_rate_limits_api_only on agentoverflow_rate_limits;
+        create policy agentoverflow_rate_limits_api_only on agentoverflow_rate_limits
+            for all to agentoverflow_api using (true) with check (true);
+
+        drop policy if exists agentoverflow_security_events_insert_only on agentoverflow_security_events;
+        create policy agentoverflow_security_events_insert_only on agentoverflow_security_events
+            for insert to agentoverflow_api with check (true);
+    end if;
+end
+$$;

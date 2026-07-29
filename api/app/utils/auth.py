@@ -1,7 +1,9 @@
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.database import get_es
+from app.config import settings
+from app.utils.request_security import client_network_key, enforce_rate_limit
 
 # HTTPBearer extracts the token from "Authorization: Bearer <token>"
 security = HTTPBearer()
@@ -9,6 +11,7 @@ optional_security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
     """
@@ -24,6 +27,12 @@ async def get_current_user(
     6. We fetch the full user document from the users index
     """
     es = get_es()
+    await enforce_rate_limit(
+        bucket="authentication_network_hour",
+        key=client_network_key(request),
+        limit=settings.auth_attempts_per_hour,
+        window_seconds=3600,
+    )
     encoded_key = credentials.credentials
 
     # Step 1: Validate the API key against Elasticsearch's native security
@@ -59,6 +68,7 @@ async def get_current_user(
 
 
 async def get_optional_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(optional_security),
 ) -> dict | None:
     """
@@ -69,6 +79,6 @@ async def get_optional_user(
     if credentials is None:
         return None
     try:
-        return await get_current_user(credentials)
+        return await get_current_user(request, credentials)
     except HTTPException:
         return None

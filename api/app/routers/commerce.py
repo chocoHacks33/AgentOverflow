@@ -1,8 +1,9 @@
 import json
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from app.config import settings
 from app.database import get_es
@@ -17,7 +18,9 @@ from app.models.commerce import (
     ReasoningPack,
 )
 from app.utils.auth import get_current_user
-from app.utils.memory_access import memory_reads_protected, verify_question_access_token
+from app.utils.content_security import require_safe_public_content
+from app.utils.memory_access import memory_reads_protected
+from app.utils.request_security import enforce_rate_limit
 
 router = APIRouter(prefix="/commerce", tags=["commerce"])
 
@@ -53,6 +56,20 @@ def _currency() -> str:
 
 def _frontend_url() -> str:
     return settings.frontend_url.rstrip("/")
+
+
+def _safe_return_url(candidate: str | None, fallback: str) -> str:
+    if not candidate:
+        return fallback
+    allowed = urlsplit(_frontend_url())
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.scheme != allowed.scheme
+        or parsed.netloc != allowed.netloc
+    ):
+        raise HTTPException(status_code=422, detail="Checkout return URL must use the configured frontend origin")
+    return candidate
 
 
 def _reasoning(answer: dict[str, Any], question: dict[str, Any], reason: str | None = None) -> str:
@@ -112,17 +129,29 @@ async def _get_answer_and_question(answer_id: str) -> tuple[dict[str, Any], dict
     return answer_hit, question_hit
 
 
-def _authorize_answer_context(
+async def _authorize_answer_context(
     answer: dict[str, Any],
     question: dict[str, Any],
     user: dict[str, Any],
-    access_token: str | None,
+    attempt_id: str | None,
 ) -> None:
     if not memory_reads_protected():
         return
     if answer.get("author_id") == user["id"] or question.get("author_id") == user["id"]:
         return
-    verify_question_access_token(access_token, answer["question_id"], user["id"])
+    if not attempt_id:
+        raise HTTPException(status_code=403, detail="A matching protected subtask attempt is required")
+    try:
+        attempt = await get_es().get(index="memory_attempts", id=attempt_id)
+    except Exception as exc:
+        raise HTTPException(status_code=403, detail="Invalid protected subtask attempt") from exc
+    source = attempt["_source"]
+    if (
+        source.get("user_id") != user["id"]
+        or source.get("question_id") != answer["question_id"]
+        or source.get("candidate_answer_id") != answer.get("id", source.get("candidate_answer_id"))
+    ):
+        raise HTTPException(status_code=403, detail="Protected subtask attempt does not match this answer")
 
 
 async def _find_paid_purchase(answer_id: str, user_id: str) -> dict[str, Any] | None:
@@ -160,16 +189,50 @@ async def _mark_purchase_paid(purchase_id: str, checkout_session_id: str | None 
     return _hit_to_purchase(purchase)
 
 
+async def _validate_paid_session(session: Any, purchase_id: str, user_id: str | None = None) -> dict[str, Any]:
+    es = get_es()
+    try:
+        purchase = await es.get(index="purchases", id=purchase_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Purchase not found") from exc
+    source = purchase["_source"]
+    if user_id and source.get("buyer_id") != user_id:
+        raise HTTPException(status_code=403, detail="Purchase belongs to another agent")
+    session_data = dict(session)
+    metadata = dict(session_data.get("metadata") or {})
+    if metadata.get("purchase_id") != purchase_id:
+        raise HTTPException(status_code=400, detail="Checkout metadata does not match purchase")
+    if str(metadata.get("buyer_id")) != str(source.get("buyer_id")):
+        raise HTTPException(status_code=400, detail="Checkout buyer metadata does not match purchase")
+    if str(metadata.get("answer_id")) != str(source.get("answer_id")):
+        raise HTTPException(status_code=400, detail="Checkout answer metadata does not match purchase")
+    if session_data.get("payment_status") == "paid":
+        amount_total = session_data.get("amount_total")
+        currency = str(session_data.get("currency") or "").lower()
+        if amount_total is not None and int(amount_total) != int(source.get("amount_cents", -1)):
+            raise HTTPException(status_code=400, detail="Checkout amount does not match purchase")
+        if currency and currency != str(source.get("currency", "")).lower():
+            raise HTTPException(status_code=400, detail="Checkout currency does not match purchase")
+    return purchase
+
+
 @router.get("/answers/{answer_id}/entitlement", response_model=EntitlementResponse)
 async def answer_entitlement(
     answer_id: str,
-    access_token: str | None = Query(None),
+    attempt_id: str | None = Header(None, alias="X-AgentOverflow-Attempt"),
     user: dict = Depends(get_current_user),
 ):
     answer_hit, question_hit = await _get_answer_and_question(answer_id)
     answer = answer_hit["_source"]
     question = question_hit["_source"]
-    _authorize_answer_context(answer, question, user, access_token)
+    answer["id"] = answer_id
+    await _authorize_answer_context(answer, question, user, attempt_id)
+    await enforce_rate_limit(
+        bucket="commerce_entitlement_user_hour",
+        key=user["id"],
+        limit=60,
+        window_seconds=3600,
+    )
     paid = await _find_paid_purchase(answer_id, user["id"])
     amount = _money_cents()
     currency = _currency()
@@ -204,7 +267,8 @@ async def answer_entitlement(
 async def create_answer_checkout(
     answer_id: str,
     body: CheckoutRequest,
-    access_token: str | None = Query(None),
+    request: Request,
+    attempt_id: str | None = Header(None, alias="X-AgentOverflow-Attempt"),
     user: dict = Depends(get_current_user),
 ):
     if memory_reads_protected() and not _stripe_enabled():
@@ -212,7 +276,15 @@ async def create_answer_checkout(
     answer_hit, question_hit = await _get_answer_and_question(answer_id)
     answer = answer_hit["_source"]
     question = question_hit["_source"]
-    _authorize_answer_context(answer, question, user, access_token)
+    answer["id"] = answer_id
+    await _authorize_answer_context(answer, question, user, attempt_id)
+    require_safe_public_content(body.reason or "", label="checkout reason")
+    await enforce_rate_limit(
+        bucket="commerce_checkout_user_hour",
+        key=user["id"],
+        limit=10,
+        window_seconds=3600,
+    )
 
     existing = await _find_paid_purchase(answer_id, user["id"])
     if existing:
@@ -271,13 +343,21 @@ async def create_answer_checkout(
         )
 
     stripe = _stripe_client()
-    success_url = body.success_url or f"{_frontend_url()}/agents?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = body.cancel_url or f"{_frontend_url()}/agents?checkout=cancelled"
+    success_url = _safe_return_url(
+        body.success_url,
+        f"{_frontend_url()}/agents?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+    )
+    cancel_url = _safe_return_url(
+        body.cancel_url,
+        f"{_frontend_url()}/agents?checkout=cancelled",
+    )
     metadata = {
         "purchase_id": purchase_id,
         "answer_id": answer_id,
         "question_id": answer["question_id"],
         "buyer_id": user["id"],
+        "amount_cents": str(amount),
+        "currency": currency,
     }
     if settings.stripe_price_id:
         line_items = [{"price": settings.stripe_price_id, "quantity": 1}]
@@ -330,9 +410,18 @@ async def create_answer_checkout(
 
 
 @router.post("/checkout/confirm", response_model=PurchasePublic)
-async def confirm_checkout(body: CheckoutConfirmRequest, user: dict = Depends(get_current_user)):
+async def confirm_checkout(
+    body: CheckoutConfirmRequest,
+    user: dict = Depends(get_current_user),
+):
     if not _stripe_enabled():
         raise HTTPException(status_code=400, detail="Stripe is not configured; demo purchases unlock immediately.")
+    await enforce_rate_limit(
+        bucket="commerce_confirm_user_hour",
+        key=user["id"],
+        limit=30,
+        window_seconds=3600,
+    )
 
     stripe = _stripe_client()
     session = stripe.checkout.Session.retrieve(body.session_id)
@@ -341,12 +430,7 @@ async def confirm_checkout(body: CheckoutConfirmRequest, user: dict = Depends(ge
         raise HTTPException(status_code=400, detail="Checkout session is missing purchase metadata")
 
     es = get_es()
-    try:
-        purchase = await es.get(index="purchases", id=purchase_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Purchase not found")
-    if purchase["_source"]["buyer_id"] != user["id"]:
-        raise HTTPException(status_code=403, detail="Purchase belongs to another agent")
+    purchase = await _validate_paid_session(session, purchase_id, user["id"])
 
     if session.payment_status != "paid":
         await es.update(
@@ -369,19 +453,22 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     signature = request.headers.get("stripe-signature")
     stripe = _stripe_client()
-    if settings.stripe_webhook_secret:
+    if not settings.stripe_webhook_secret:
+        if memory_reads_protected():
+            raise HTTPException(status_code=503, detail="Stripe webhook signing secret is required")
+        event = json.loads(payload.decode("utf-8"))
+    else:
         try:
             event = stripe.Webhook.construct_event(payload, signature, settings.stripe_webhook_secret)
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook signature: {exc}") from exc
-    else:
-        event = json.loads(payload.decode("utf-8"))
+            raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature") from exc
 
     if event.get("type") in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
         session = event["data"]["object"]
         purchase_id = session.get("client_reference_id") or session.get("metadata", {}).get("purchase_id")
         payment_status = session.get("payment_status")
         if purchase_id and payment_status == "paid":
+            await _validate_paid_session(session, purchase_id)
             await _mark_purchase_paid(purchase_id, checkout_session_id=session.get("id"))
 
     return {"received": True}

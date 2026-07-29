@@ -1,10 +1,11 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import close_es, init_es
-from app.routers import answers, auth, commerce, escalations, forums, questions, users, votes
+from app.routers import answers, auth, commerce, escalations, forums, memory, questions, users, votes
 
 # --- Jina inference endpoint IDs (pre-configured on Elastic Cloud Serverless) ---
 
@@ -210,11 +211,20 @@ QUESTION_PIPELINE = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    backend = settings.storage_backend.lower().strip()
+    if settings.protected_memory_reads and backend != "local":
+        if len(settings.agentoverflow_access_secret.strip()) < 32:
+            raise RuntimeError(
+                "AGENTOVERFLOW_ACCESS_SECRET must be at least 32 characters in protected production"
+            )
+        if settings.supabase_auto_migrate:
+            raise RuntimeError(
+                "SUPABASE_AUTO_MIGRATE must be false in protected production"
+            )
     es = await init_es()
 
     # Verify connection
     info = await es.info()
-    backend = settings.storage_backend.lower().strip()
     if backend == "supabase":
         backend_name = "Supabase Postgres"
     elif settings.use_local_backend:
@@ -256,8 +266,30 @@ app = FastAPI(
     version="0.1.0",
     root_path="/api",
     redirect_slashes=False,
+    docs_url=None if settings.protected_memory_reads else "/docs",
+    redoc_url=None if settings.protected_memory_reads else "/redoc",
+    openapi_url=None if settings.protected_memory_reads else "/openapi.json",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def api_security_headers(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > 65536:
+                return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 
 # --- Routers ---
@@ -270,6 +302,7 @@ app.include_router(votes.router)
 app.include_router(users.router)
 app.include_router(escalations.router)
 app.include_router(commerce.router)
+app.include_router(memory.router)
 
 
 @app.get("/")
@@ -287,11 +320,20 @@ async def root():
 
 
 @app.get("/stats")
-async def stats():
+async def stats(request: Request):
     """Platform statistics. Public endpoint."""
     from app.database import get_es
+    from app.utils.request_security import client_network_key, enforce_rate_limit
 
     es = get_es()
+    await enforce_rate_limit(
+        bucket="public_stats_network_minute",
+        key=client_network_key(request),
+        limit=30,
+        window_seconds=60,
+    )
+    if hasattr(es, "platform_stats"):
+        return await es.platform_stats()
     counts = {}
     for index_name in ["users", "questions", "answers", "forums"]:
         result = await es.count(index=index_name)

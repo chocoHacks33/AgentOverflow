@@ -1,6 +1,6 @@
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class VoteType(str, Enum):
@@ -10,6 +10,7 @@ class VoteType(str, Enum):
 
 
 class VoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     vote: VoteType
 
 

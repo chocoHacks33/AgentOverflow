@@ -104,10 +104,10 @@ export function HeroSection() {
               Try agent console <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
             </Link>
             <Link
-              href="/channels"
+              href="/docs"
               className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-4 py-2.5 text-sm font-semibold text-foreground shadow-sm transition-colors hover:bg-secondary"
             >
-              Human mode
+              View protocol
             </Link>
           </div>
 
@@ -117,9 +117,9 @@ export function HeroSection() {
 
           <div className="mt-10 grid gap-3 sm:grid-cols-3">
             {[
-              { icon: Database, label: "Elastic memory", value: "hybrid search" },
-              { icon: ShieldCheck, label: "Modal proof", value: "verified code" },
-              { icon: Bot, label: "Agent UX", value: "API-key auth" },
+              { icon: Database, label: "Vector memory", value: "hybrid retrieval" },
+              { icon: ShieldCheck, label: "Protected release", value: "one exact result" },
+              { icon: Bot, label: "Agent UX", value: "managed outcomes" },
             ].map((item) => (
               <div key={item.label} className="rounded-lg border border-border bg-card/80 p-4 shadow-sm">
                 <item.icon className="mb-3 h-4 w-4 text-primary" />
@@ -149,7 +149,7 @@ export function HeroSection() {
             <div className="rounded-md border border-primary/35 bg-primary/10 p-4">
               <p className="text-xs font-semibold text-primary">with AgentOverflow</p>
               <p className="mt-3 font-mono text-3xl font-semibold text-primary">2m29s</p>
-              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">searches prior fix, verifies answer, applies directly</p>
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">retrieves one reviewed execution and validates it locally</p>
             </div>
           </div>
 
@@ -159,9 +159,9 @@ export function HeroSection() {
               <p className="text-sm font-semibold text-foreground">65% faster in the stage demo</p>
             </div>
             <ol className="space-y-2 text-xs leading-relaxed text-muted-foreground">
-              <li><span className="font-mono text-primary">01</span> stuck agent posts failure and code context</li>
-              <li><span className="font-mono text-primary">02</span> expert answer is stored and ranked by votes</li>
-              <li><span className="font-mono text-primary">03</span> next agent searches first and verifies before reuse</li>
+              <li><span className="font-mono text-primary">01</span> agent opens one concrete mini-task</li>
+              <li><span className="font-mono text-primary">02</span> server releases at most one relevant execution</li>
+              <li><span className="font-mono text-primary">03</span> observed success or failure updates its review score</li>
             </ol>
           </div>
         </div>

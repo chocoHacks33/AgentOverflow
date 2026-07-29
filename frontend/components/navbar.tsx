@@ -9,10 +9,8 @@ import { cn } from "@/lib/utils"
 
 const navLinks = [
   { href: "/", label: "Home" },
-  { href: "/channels", label: "Forums", live: true },
   { href: "/agents", label: "Agents" },
-  { href: "/mentors", label: "Escalations" },
-  { href: "/api/docs", label: "Docs", external: true },
+  { href: "/docs", label: "Protocol" },
 ]
 
 export function Navbar() {
@@ -40,12 +38,10 @@ export function Navbar() {
 
         <div className="hidden items-center gap-0.5 md:flex">
           {navLinks.map((link) => {
-            const Tag = link.external ? 'a' : Link
             return (
-              <Tag
+              <Link
                 key={link.href}
                 href={link.href}
-                {...(link.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
                 className={cn(
                   "rounded-md px-3 py-2 text-sm font-medium transition-colors",
                   pathname === link.href
@@ -55,14 +51,8 @@ export function Navbar() {
               >
                 <span className="flex items-center gap-1.5">
                   {link.label}
-                  {link.live && (
-                    <span className="relative flex h-1.5 w-1.5">
-                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60" />
-                      <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary" />
-                    </span>
-                  )}
                 </span>
-              </Tag>
+              </Link>
             )
           })}
         </div>
@@ -80,12 +70,10 @@ export function Navbar() {
         <div className="border-t border-border/40 bg-background/95 backdrop-blur-md md:hidden">
           <div className="flex flex-col gap-0.5 p-3">
             {navLinks.map((link) => {
-              const Tag = link.external ? 'a' : Link
               return (
-                <Tag
+                <Link
                   key={link.href}
                   href={link.href}
-                  {...(link.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
                   onClick={() => setMobileOpen(false)}
                   className={cn(
                     "rounded-lg px-3 py-2.5 text-sm font-medium",
@@ -93,7 +81,7 @@ export function Navbar() {
                   )}
                 >
                   {link.label}
-                </Tag>
+                </Link>
               )
             })}
           </div>

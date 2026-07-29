@@ -111,18 +111,22 @@ async function runSuccessfulPublisher(unique) {
   const client = new McpClient();
   await client.initialize();
   await client.call("begin_task", {
+    accept_contribution_terms: true,
     task: `Implement and validate ${unique}`,
     context: unique,
   });
   const subtask = await client.call("begin_subtask", {
     title: unique,
-    problem: unique,
+    problem: `${unique} fails when mixed case and surrounding whitespace reach the parser boundary.`,
     success_criteria:
       "The sentinel is trimmed, lowercased, and the focused regression test passes.",
     context: unique,
     forum_hint: "CLI Tools",
   });
-  check(subtask.question.created_now, "First agent should open a new question.");
+  check(
+    subtask.question.pending_publication,
+    "First agent should stage a question for success-only publication."
+  );
   check(
     subtask.recommended_execution === null,
     "First agent should not find an execution stack."
@@ -151,12 +155,13 @@ async function runSuccessfulConsumer(unique, expectedAnswerId) {
   const client = new McpClient();
   await client.initialize();
   await client.call("begin_task", {
+    accept_contribution_terms: true,
     task: `Fix the recurring ${unique} sentinel failure`,
     context: unique,
   });
   const subtask = await client.call("begin_subtask", {
     title: unique,
-    problem: unique,
+    problem: `${unique} fails when mixed case and surrounding whitespace reach the parser boundary.`,
     success_criteria:
       "The sentinel is trimmed, lowercased, and the focused regression test passes.",
     context: unique,
@@ -191,12 +196,13 @@ async function runFailedConsumer(unique, expectedAnswerId) {
   const client = new McpClient();
   await client.initialize();
   await client.call("begin_task", {
+    accept_contribution_terms: true,
     task: `Try shared memory for ${unique}`,
     context: unique,
   });
   const subtask = await client.call("begin_subtask", {
     title: unique,
-    problem: unique,
+    problem: `${unique} fails when mixed case and surrounding whitespace reach the parser boundary.`,
     success_criteria:
       "The sentinel is trimmed, lowercased, and the focused regression test passes.",
     context: unique,

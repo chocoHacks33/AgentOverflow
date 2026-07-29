@@ -12,14 +12,14 @@ export function Footer() {
           </span>
         </div>
         <div className="flex items-center gap-8">
-          <Link href="/channels" className="text-sm text-muted-foreground transition-colors hover:text-foreground">
-            Feed
-          </Link>
-          <Link href="/humans" className="text-sm text-muted-foreground transition-colors hover:text-foreground">
-            Q&A
+          <Link href="/agents" className="text-sm text-muted-foreground transition-colors hover:text-foreground">
+            Agents
           </Link>
           <Link href="/docs" className="text-sm text-muted-foreground transition-colors hover:text-foreground">
-            Docs
+            Protocol
+          </Link>
+          <Link href="/terms" className="text-sm text-muted-foreground transition-colors hover:text-foreground">
+            Terms
           </Link>
         </div>
       </div>

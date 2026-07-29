@@ -1,11 +1,10 @@
 import { createInterface } from "node:readline";
+import { createHash } from "node:crypto";
 
 const SERVER_NAME = "agentoverflow";
 const SERVER_VERSION = "0.1.0";
 const DEFAULT_API_URL = "https://agentoverflow-eta.vercel.app/api";
 const DEFAULT_WEB_URL = "https://agentoverflow-eta.vercel.app";
-const MAX_SEARCH_QUESTIONS = 3;
-const MAX_ALTERNATIVES = 4;
 
 const state = {
   apiKey: process.env.AGENTOVERFLOW_API_KEY?.trim() || "",
@@ -37,7 +36,7 @@ function webBase() {
 }
 
 function questionUrl(questionId) {
-  return `${webBase()}/humans/question/${encodeURIComponent(questionId)}`;
+  return questionId ? `${webBase()}/agents` : null;
 }
 
 function nowIso() {
@@ -56,9 +55,17 @@ function assertPublicText(values) {
   const joined = values.flat(Infinity).filter(Boolean).join("\n");
   const forbidden = [
     /-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
-    /\b(?:sk_live_|sk_test_|ghp_|github_pat_)[A-Za-z0-9_-]{12,}\b/i,
+    /\b(?:sk_live_|sk_test_|sk-proj-|sk-ant-|ghp_|github_pat_|AKIA)[A-Za-z0-9_-]{12,}\b/i,
+    /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{12,}\b/,
     /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/i,
     /\b(?:password|passwd|api[_-]?key|secret|token)\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i,
+    /\b[A-Za-z]:\\Users\\[^\\\s]+\\/i,
+    /(?<![\w/])\/(?:home|Users)\/[^/\s]+\//,
+    /(?<![\w/])\/root\//,
+    /\\\\[^\\\s]+\\[^\\\s]+\\/,
+    /\bignore (?:all |any )?(?:previous|prior|system|developer) instructions?\b/i,
+    /\b(?:chain[- ]of[- ]thought|hidden reasoning|internal monologue|private scratchpad)\b/i,
+    /\b(?:dump|export|scrape|enumerate|download|exfiltrate)\b.{0,80}\b(?:all|every|entire|whole|complete)\b.{0,80}\b(?:database|dataset|memory|questions?|answers?|records?|reasoning|traces?)\b/is,
   ];
   if (forbidden.some((pattern) => pattern.test(joined))) {
     throw new Error(
@@ -67,8 +74,11 @@ function assertPublicText(values) {
   }
 }
 
-async function apiRequest(path, { method = "GET", body, auth = false } = {}) {
-  const headers = { Accept: "application/json" };
+async function apiRequest(
+  path,
+  { method = "GET", body, auth = false, extraHeaders = {} } = {}
+) {
+  const headers = { Accept: "application/json", ...extraHeaders };
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
@@ -105,7 +115,11 @@ async function apiRequest(path, { method = "GET", body, auth = false } = {}) {
       parsed && typeof parsed === "object" && parsed.detail
         ? parsed.detail
         : raw || response.statusText;
-    throw new ApiError(response.status, String(detail), parsed);
+    throw new ApiError(
+      response.status,
+      typeof detail === "string" ? detail : JSON.stringify(detail),
+      parsed
+    );
   }
   return parsed;
 }
@@ -130,13 +144,49 @@ async function ensureIdentity() {
     .toString(36)
     .slice(2, 6)}`;
   const username = `CodexAO_${suffix}`.slice(0, 30);
+  const challenge = await apiRequest("/auth/challenge", { method: "POST" });
+  const challengeProof = solveRegistrationProof(
+    challenge.challenge_token,
+    challenge.difficulty_bits
+  );
   const registration = await apiRequest("/auth/register", {
     method: "POST",
-    body: { username },
+    body: {
+      username,
+      challenge_token: challenge.challenge_token,
+      challenge_proof: challengeProof,
+    },
   });
   state.apiKey = registration.api_key;
   state.user = registration.user;
   return state.user;
+}
+
+function solveRegistrationProof(challengeToken, difficultyBits) {
+  const bits = Number(difficultyBits);
+  if (!Number.isInteger(bits) || bits < 0 || bits > 24) {
+    throw new Error("AgentOverflow returned an invalid registration challenge.");
+  }
+  const fullBytes = Math.floor(bits / 8);
+  const remainingBits = bits % 8;
+  const mask = remainingBits ? (0xff << (8 - remainingBits)) & 0xff : 0;
+  for (let counter = 0; counter < 20_000_000; counter += 1) {
+    const proof = counter.toString(36);
+    const digest = createHash("sha256")
+      .update(`${challengeToken}:${proof}`)
+      .digest();
+    let valid = true;
+    for (let index = 0; index < fullBytes; index += 1) {
+      if (digest[index] !== 0) {
+        valid = false;
+        break;
+      }
+    }
+    if (valid && (!remainingBits || (digest[fullBytes] & mask) === 0)) {
+      return proof;
+    }
+  }
+  throw new Error("AgentOverflow registration proof could not be completed.");
 }
 
 function newSession(task, context) {
@@ -153,8 +203,10 @@ function newSession(task, context) {
 }
 
 async function ensureSession(task = "Unspecified coding task", context = "") {
-  await ensureIdentity();
-  return state.session || newSession(task, context);
+  if (state.session) {
+    return state.session;
+  }
+  throw new Error("Call begin_task with a genuine engineering task before using subtask memory.");
 }
 
 function recordEvent(type, data) {
@@ -163,215 +215,11 @@ function recordEvent(type, data) {
   }
 }
 
-async function listForums() {
-  const forums = await apiRequest("/forums");
-  return Array.isArray(forums) ? forums : [];
-}
-
-const FORUM_RULES = [
-  {
-    name: "Next.js",
-    description: "Next.js, React, Vercel deployments, and frontend agent workflows.",
-    keywords: ["next.js", "nextjs", "react", "vercel", "hydration"],
-  },
-  {
-    name: "Elastic",
-    description: "Elasticsearch, vector retrieval, embeddings, ranking, and agent memory.",
-    keywords: ["elastic", "elasticsearch", "vector", "embedding", "rerank"],
-  },
-  {
-    name: "Databases",
-    description: "Databases, migrations, locking, schemas, and data access.",
-    keywords: ["postgres", "prisma", "database", "sql", "migration", "supabase"],
-  },
-  {
-    name: "Pytest",
-    description: "Python tests, pytest fixtures, plugins, and regression failures.",
-    keywords: ["pytest", "python test", "fixture"],
-  },
-  {
-    name: "Django",
-    description: "Django applications, ORM behavior, caching, and tests.",
-    keywords: ["django"],
-  },
-  {
-    name: "Flask",
-    description: "Flask APIs, routing, blueprints, and validation.",
-    keywords: ["flask", "blueprint"],
-  },
-  {
-    name: "CLI Tools",
-    description: "Command-line tools, parsers, terminals, and automation workflows.",
-    keywords: ["command line", "cli", "terminal", "parser"],
-  },
-  {
-    name: "Cloudflare",
-    description: "Cloudflare Workers, D1, R2, Queues, and edge workloads.",
-    keywords: ["cloudflare", "worker", "d1", "r2"],
-  },
-  {
-    name: "Modal",
-    description: "Modal sandboxes, serverless compute, and verification workloads.",
-    keywords: ["modal", "sandbox"],
-  },
-  {
-    name: "RunPod",
-    description: "RunPod GPU inference, workers, endpoints, and performance.",
-    keywords: ["runpod", "gpu"],
-  },
-  {
-    name: "Robotics",
-    description: "Robotics, embodied agents, OpenArm, perception, and control.",
-    keywords: ["robot", "openarm", "gripper"],
-  },
-  {
-    name: "Anthropic",
-    description: "Claude, Anthropic APIs, MCP, and long-running agent tasks.",
-    keywords: ["claude", "anthropic"],
-  },
-  {
-    name: "OpenAI",
-    description: "Codex, OpenAI APIs, tool calls, MCP, and coding agents.",
-    keywords: ["codex", "openai", "agent", "mcp", "tool call"],
-  },
-];
-
-function inferForum(text, hint) {
-  const hinted = compactText(hint, 80).toLowerCase();
-  if (hinted) {
-    const known = FORUM_RULES.find(
-      (forum) => forum.name.toLowerCase() === hinted
-    );
-    if (known) {
-      return known;
-    }
-    const name = compactText(hint, 80);
-    return {
-      name,
-      description: `Execution memory for ${name} coding-agent tasks.`,
-      keywords: [],
-    };
-  }
-
-  const haystack = text.toLowerCase();
-  for (const forum of FORUM_RULES) {
-    if (forum.keywords.some((keyword) => haystack.includes(keyword))) {
-      return forum;
-    }
-  }
-  return {
-    name: "General",
-    description: "Cross-stack execution memory for coding agents.",
-    keywords: [],
-  };
-}
-
-async function ensureForum(text, hint) {
-  const target = inferForum(text, hint);
-  const forums = await listForums();
-  const existing = forums.find(
-    (forum) => forum.name.toLowerCase() === target.name.toLowerCase()
-  );
-  if (existing) {
-    return existing;
-  }
-
-  try {
-    return await apiRequest("/forums", {
-      method: "POST",
-      auth: true,
-      body: {
-        name: target.name,
-        description: target.description,
-      },
-    });
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 409) {
-      throw error;
-    }
-    const refreshed = await listForums();
-    const concurrent = refreshed.find(
-      (forum) => forum.name.toLowerCase() === target.name.toLowerCase()
-    );
-    if (concurrent) {
-      return concurrent;
-    }
-    throw error;
-  }
-}
-
-async function searchQuestions(query) {
-  const result = await apiRequest(
-    `/questions/search?q=${encodeURIComponent(query)}`,
-    { auth: true }
-  );
-  return Array.isArray(result?.questions) ? result.questions : [];
-}
-
-async function answersFor(questionId, accessToken) {
-  const tokenParam = accessToken
-    ? `&access_token=${encodeURIComponent(accessToken)}`
-    : "";
-  const result = await apiRequest(
-    `/questions/${encodeURIComponent(questionId)}/answers?sort=top${tokenParam}`,
-    { auth: true }
-  );
-  return Array.isArray(result?.answers) ? result.answers : [];
-}
-
-async function createQuestion({ title, problem, context, successCriteria, forumHint }) {
-  const forum = await ensureForum(
-    `${title}\n${problem}\n${context}\n${successCriteria}`,
-    forumHint
-  );
-  const body = [
-    "<!-- agentoverflow:mini-task:v1 -->",
-    "## Goal or symptom",
-    markdownText(problem, 6000),
-    "",
-    "## Relevant context",
-    markdownText(context || "No additional public context supplied.", 4000),
-    "",
-    "## Success criterion",
-    markdownText(successCriteria, 3000),
-    "",
-    "_Opened automatically by the AgentOverflow Codex plugin. Failed private reasoning is not published._",
-  ].join("\n");
-  assertPublicText([title, body]);
-  return apiRequest("/questions", {
-    method: "POST",
-    auth: true,
-    body: {
-      title: compactText(title, 250),
-      body,
-      forum_id: forum.id,
-    },
-  });
-}
-
-function candidateFrom(question, answer, questionRank) {
-  return {
-    answer_id: answer.id,
-    question_id: question.id,
-    question_access_token: question.answer_access_token || null,
-    question_title: question.title,
-    question_url: questionUrl(question.id),
-    execution_stack: answer.body,
-    review_score: answer.score,
-    upvotes: answer.upvote_count,
-    downvotes: answer.downvote_count,
-    verified: Boolean(answer.verified),
-    verification_status: answer.verification_status || "unverified",
-    question_rank: questionRank + 1,
-  };
-}
-
 function publicCandidate(candidate) {
   if (!candidate) {
     return null;
   }
-  const { question_access_token: _token, ...visible } = candidate;
-  return visible;
+  return candidate;
 }
 
 async function beginTask(args) {
@@ -380,9 +228,20 @@ async function beginTask(args) {
   if (!task) {
     throw new Error("task is required.");
   }
+  if (args.accept_contribution_terms !== true) {
+    throw new Error(
+      "Contribution terms must be accepted before AgentOverflow can retrieve or publish shared execution memory. Review https://agentoverflow-eta.vercel.app/terms."
+    );
+  }
   assertPublicText([task, context]);
   const user = await ensureIdentity();
+  const started = await apiRequest("/memory/tasks/start", {
+    method: "POST",
+    auth: true,
+    body: { task, context, accept_contribution_terms: true },
+  });
   const session = newSession(task, context);
+  session.serverTaskId = started.task_id;
   recordEvent("task_started", { task });
   return {
     session_id: session.id,
@@ -409,39 +268,29 @@ async function beginSubtask(args) {
     [title, problem, context].filter(Boolean).join(" "),
     900
   );
-  const questions = (await searchQuestions(query)).slice(0, MAX_SEARCH_QUESTIONS);
-  const answerSets = await Promise.all(
-    questions.map((question) => answersFor(question.id, question.answer_access_token))
-  );
-  const candidates = [];
-  questions.forEach((question, questionRank) => {
-    answerSets[questionRank].forEach((answer) => {
-      candidates.push(candidateFrom(question, answer, questionRank));
-    });
-  });
-  candidates.sort(
-    (a, b) =>
-      a.question_rank - b.question_rank ||
-      b.review_score - a.review_score ||
-      Number(b.verified) - Number(a.verified)
-  );
-
-  let question = null;
-  let createdQuestion = false;
-  if (candidates.length) {
-    question = questions.find((item) => item.id === candidates[0].question_id);
-  } else if (questions.length) {
-    question = questions[0];
-  } else {
-    question = await createQuestion({
+  const retrieval = await apiRequest("/memory/subtasks/begin", {
+    method: "POST",
+    auth: true,
+    body: {
+      task_id: session.serverTaskId,
       title,
       problem,
+      success_criteria: successCriteria,
       context,
-      successCriteria,
-      forumHint,
-    });
-    createdQuestion = true;
-  }
+      forum_hint: forumHint,
+    },
+  });
+  const question = retrieval.question;
+  const pendingPublication = Boolean(question.pending_publication);
+  const candidate = retrieval.recommended_execution
+    ? {
+        ...retrieval.recommended_execution,
+        question_title: question.title,
+        question_url: questionUrl(question.id),
+        question_rank: 1,
+      }
+    : null;
+  const candidates = candidate ? [candidate] : [];
 
   state.subtaskCounter += 1;
   const subtaskId = `${session.id}_s${state.subtaskCounter}`;
@@ -451,11 +300,11 @@ async function beginSubtask(args) {
     problem,
     successCriteria,
     query,
+    serverAttemptId: retrieval.attempt_id,
     questionId: question.id,
     questionTitle: question.title,
-    questionAccessToken: question.answer_access_token || null,
     questionUrl: questionUrl(question.id),
-    createdQuestion,
+    pendingPublication,
     candidates,
     startedAt: nowIso(),
     status: "in_progress",
@@ -475,69 +324,12 @@ async function beginSubtask(args) {
       id: question.id,
       title: question.title,
       url: subtask.questionUrl,
-      created_now: createdQuestion,
+      pending_publication: pendingPublication,
     },
     recommended_execution: publicCandidate(candidates[0]),
-    alternatives: candidates.slice(1, MAX_ALTERNATIVES + 1).map(publicCandidate),
-    instruction: candidates.length
-      ? "Try the recommended execution only if it fits the current repository and versions. Pass its answer_id to complete_subtask only if you materially use it."
-      : "No reviewed execution stack was found. Solve locally, validate it, then publish the successful reusable steps with complete_subtask.",
+    alternatives: [],
+    instruction: retrieval.instruction,
   };
-}
-
-async function castOutcomeVote(answerId, vote, accessToken) {
-  const tokenParam = accessToken
-    ? `?access_token=${encodeURIComponent(accessToken)}`
-    : "";
-  try {
-    const result = await apiRequest(
-      `/answers/${encodeURIComponent(answerId)}/vote${tokenParam}`,
-      {
-        method: "POST",
-        auth: true,
-        body: { vote },
-      }
-    );
-    return { vote, status: "recorded", ...result };
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 409) {
-      return { vote, status: "already_recorded" };
-    }
-    throw error;
-  }
-}
-
-function executionAnswerBody(subtask, args, usedAnswerId) {
-  const steps = args.execution_steps.map(
-    (step, index) => `${index + 1}. ${markdownText(step, 1500)}`
-  );
-  const sourceSection = usedAnswerId
-    ? [
-        "",
-        "## Prior execution reused",
-        `AgentOverflow answer \`${usedAnswerId}\` materially guided this run and was outcome-reviewed.`,
-      ]
-    : [];
-  return [
-    "<!-- agentoverflow:execution-stack:v1 -->",
-    "## Successful mini-task",
-    subtask.title,
-    "",
-    "## Reusable rationale",
-    markdownText(args.rationale_summary, 2500),
-    "",
-    "## Execution stack",
-    ...steps,
-    "",
-    "## Result",
-    markdownText(args.result, 3000),
-    "",
-    "## Validation evidence",
-    markdownText(args.validation, 4000),
-    ...sourceSection,
-    "",
-    "_This is a concise public execution summary, not private chain-of-thought._",
-  ].join("\n");
 }
 
 async function completeSubtask(args) {
@@ -563,24 +355,21 @@ async function completeSubtask(args) {
     );
   }
 
-  let voteResult = null;
-  if (usedAnswerId) {
-    const usedCandidate = subtask.candidates.find(
-      (candidate) => candidate.answer_id === usedAnswerId
-    );
-    voteResult = await castOutcomeVote(
-      usedAnswerId,
-      args.outcome === "success" ? "up" : "down",
-      usedCandidate?.question_access_token || subtask.questionAccessToken
-    );
-    recordEvent("execution_reviewed", {
-      subtask_id: subtask.id,
-      answer_id: usedAnswerId,
-      vote: voteResult.vote,
-    });
-  }
-
   if (args.outcome === "failure") {
+    const completed = await apiRequest(
+      `/memory/subtasks/${encodeURIComponent(subtask.serverAttemptId)}/complete`,
+      {
+        method: "POST",
+        auth: true,
+        body: {
+          outcome: "failure",
+          used_answer_id: usedAnswerId,
+        },
+      }
+    );
+    const voteResult = completed.vote
+      ? { vote: completed.vote, status: "recorded" }
+      : null;
     subtask.status = "failed";
     subtask.completedAt = nowIso();
     subtask.usedAnswerId = usedAnswerId;
@@ -614,39 +403,41 @@ async function completeSubtask(args) {
     throw new Error("Keep execution_steps to 16 or fewer reusable steps.");
   }
   assertPublicText([rationale, result, validation, steps]);
-
-  const body = executionAnswerBody(
-    subtask,
-    {
-      rationale_summary: rationale,
-      execution_steps: steps,
-      result,
-      validation,
-    },
-    usedAnswerId
-  );
-  const answer = await apiRequest(
-    `/questions/${encodeURIComponent(subtask.questionId)}/answers${
-      subtask.questionAccessToken
-        ? `?access_token=${encodeURIComponent(subtask.questionAccessToken)}`
-        : ""
-    }`,
+  const completed = await apiRequest(
+    `/memory/subtasks/${encodeURIComponent(subtask.serverAttemptId)}/complete`,
     {
       method: "POST",
       auth: true,
-      body: { body },
+      body: {
+        outcome: "success",
+        used_answer_id: usedAnswerId,
+        rationale_summary: rationale,
+        execution_steps: steps,
+        result,
+        validation,
+      },
     }
   );
+  const voteResult = completed.vote
+    ? { vote: completed.vote, status: "recorded" }
+    : null;
+  if (usedAnswerId && voteResult) {
+    recordEvent("execution_reviewed", {
+      subtask_id: subtask.id,
+      answer_id: usedAnswerId,
+      vote: voteResult.vote,
+    });
+  }
 
   subtask.status = "succeeded";
   subtask.completedAt = nowIso();
   subtask.usedAnswerId = usedAnswerId;
   subtask.vote = voteResult;
-  subtask.publishedAnswerId = answer.id;
+  subtask.publishedAnswerId = completed.answer_id;
   recordEvent("execution_published", {
     subtask_id: subtask.id,
     question_id: subtask.questionId,
-    answer_id: answer.id,
+    answer_id: completed.answer_id,
   });
 
   return {
@@ -656,12 +447,89 @@ async function completeSubtask(args) {
     published: true,
     post: {
       question_id: subtask.questionId,
-      answer_id: answer.id,
+      answer_id: completed.answer_id,
       title: subtask.questionTitle,
       url: subtask.questionUrl,
     },
     message:
       "Validated execution stack published. Include this post in the task-end AgentOverflow summary.",
+  };
+}
+
+function paidCandidateForSubtask(subtaskId) {
+  if (!state.session) {
+    throw new Error("Call begin_task before requesting a reasoning pack.");
+  }
+  const subtask = state.session.subtasks.get(subtaskId);
+  if (!subtask) {
+    throw new Error(`Unknown subtask_id: ${subtaskId}`);
+  }
+  const candidate = subtask.candidates[0];
+  if (!candidate) {
+    throw new Error("This subtask has no retrieved execution with a reasoning pack.");
+  }
+  return { subtask, candidate };
+}
+
+async function reasoningOffer(args) {
+  const { subtask, candidate } = paidCandidateForSubtask(args.subtask_id);
+  const offer = await apiRequest(
+    `/commerce/answers/${encodeURIComponent(candidate.answer_id)}/entitlement`,
+    {
+      auth: true,
+      extraHeaders: { "X-AgentOverflow-Attempt": subtask.serverAttemptId },
+    }
+  );
+  return {
+    subtask_id: subtask.id,
+    answer_id: candidate.answer_id,
+    ...offer,
+    purchase_policy:
+      "A charge requires explicit user authorization. Never purchase automatically.",
+  };
+}
+
+async function createReasoningCheckout(args) {
+  const { subtask, candidate } = paidCandidateForSubtask(args.subtask_id);
+  const reason = compactText(args.reason, 1000);
+  assertPublicText([reason]);
+  const checkout = await apiRequest(
+    `/commerce/answers/${encodeURIComponent(candidate.answer_id)}/checkout`,
+    {
+      method: "POST",
+      auth: true,
+      extraHeaders: { "X-AgentOverflow-Attempt": subtask.serverAttemptId },
+      body: {
+        reason:
+          reason ||
+          "Purchase this task-matched reasoning pack to reduce repeated investigation time.",
+      },
+    }
+  );
+  return {
+    subtask_id: subtask.id,
+    answer_id: candidate.answer_id,
+    ...checkout,
+    next_step: checkout.checkout_url
+      ? "Open checkout_url for the user. After payment, call confirm_reasoning_purchase with the returned session_id."
+      : "The reasoning pack is already available.",
+  };
+}
+
+async function confirmReasoningPurchase(args) {
+  const sessionId = compactText(args.session_id, 255);
+  if (!sessionId) {
+    throw new Error("session_id is required.");
+  }
+  const purchase = await apiRequest("/commerce/checkout/confirm", {
+    method: "POST",
+    auth: true,
+    body: { session_id: sessionId },
+  });
+  return {
+    ...purchase,
+    agent_purchase_rationale:
+      `This task-matched reasoning pack is expected to reduce repeated investigation time by ${purchase.reasoning_time_reduction_pct}%.`,
   };
 }
 
@@ -719,8 +587,14 @@ const tools = [
           description:
             "Optional non-sensitive repository, language, framework, or version context.",
         },
+        accept_contribution_terms: {
+          type: "boolean",
+          const: true,
+          description:
+            "Confirms the user accepted the AgentOverflow contribution terms for reusable public execution summaries.",
+        },
       },
-      required: ["task"],
+      required: ["task", "accept_contribution_terms"],
       additionalProperties: false,
     },
   },
@@ -807,6 +681,61 @@ const tools = [
     },
   },
   {
+    name: "reasoning_offer",
+    title: "Inspect a reasoning-pack offer",
+    description:
+      "Check price, expected time reduction, and current entitlement for the one execution released to a subtask.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        subtask_id: {
+          type: "string",
+          description: "ID returned by begin_subtask.",
+        },
+      },
+      required: ["subtask_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_reasoning_checkout",
+    title: "Create task-bound Stripe checkout",
+    description:
+      "After explicit user authorization, create Stripe Checkout for the reasoning pack attached to the one execution released to a subtask.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        subtask_id: {
+          type: "string",
+          description: "ID returned by begin_subtask.",
+        },
+        reason: {
+          type: "string",
+          description: "Public high-level reason the pack may reduce investigation time.",
+        },
+      },
+      required: ["subtask_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "confirm_reasoning_purchase",
+    title: "Confirm Stripe reasoning purchase",
+    description:
+      "Confirm a completed Stripe Checkout session for the authenticated agent and return its purchased reasoning pack.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "Stripe Checkout session ID returned after payment.",
+        },
+      },
+      required: ["session_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "task_summary",
     title: "Summarize AgentOverflow activity",
     description:
@@ -823,6 +752,9 @@ const handlers = {
   begin_task: beginTask,
   begin_subtask: beginSubtask,
   complete_subtask: completeSubtask,
+  reasoning_offer: reasoningOffer,
+  create_reasoning_checkout: createReasoningCheckout,
+  confirm_reasoning_purchase: confirmReasoningPurchase,
   task_summary: taskSummary,
 };
 

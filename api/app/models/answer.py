@@ -1,9 +1,10 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AnswerCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     body: str = Field(..., min_length=1, max_length=50000)
 
 
